@@ -12,7 +12,7 @@ async function req(method, path, { params = {}, body } = {}) {
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error('Cannot reach the API. Is the backend running on port 8000?');
+    throw new Error(`Cannot reach the API. Is the backend running on port ${__API_PORT__}?`);
   }
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;

@@ -9,20 +9,22 @@ FastAPI + SQLite backend, React + Tailwind (Vite) frontend. Amounts are in INR.
 cd backend
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8010
 ```
 
-**Frontend, dev mode** (terminal 2). Vite proxies `/api` to the backend.
+**Frontend, dev mode** (terminal 2). Vite proxies `/api` to the backend on port 8010
+(`FT_API_PORT=9000 npm run dev` if you run the backend elsewhere). The ports avoid the usual
+8000/5173 so this can run next to other projects.
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:5173
+npm run dev          # http://localhost:5180
 ```
 
 **Single-server mode.** Build once and FastAPI serves the app itself:
 ```bash
 cd frontend && npm run build
-# then open http://localhost:8000
+# then open http://localhost:8010
 ```
 
 The first launch seeds **demo data** (JioAirFiber, EatClub, Claude Pro, SIPs, credit cards, rent...).
