@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Moon, Plus, Sun, CheckCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Moon, Plus, Sun, CheckCheck } from 'lucide-react';
 import { api } from './lib/api';
 import { ALERT_DAYS, computeVariance, summarize } from './lib/calc';
 import { daysInMonth, localISO, monthLabel, parseISO, shiftMonth } from './lib/format';
@@ -148,6 +148,15 @@ export default function App() {
           <button className="btn-primary" onClick={() => setForm({})}>
             <Plus className="h-4 w-4" /> <span className="hidden sm:inline">Add expense</span><span className="sm:hidden">Add</span>
           </button>
+          <a
+            className="btn-outline p-2"
+            href="/api/backup"
+            download
+            aria-label="Download a backup of your data"
+            title="Download backup"
+          >
+            <Download className="h-4 w-4" />
+          </a>
           <button
             className="btn-outline p-2"
             onClick={toggleTheme}

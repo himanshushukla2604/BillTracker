@@ -50,8 +50,25 @@ skip it. The database lives at `backend/data/finance.db` (override with `FT_DB=/
 
 Date-sensitive endpoints take an optional `today=YYYY-MM-DD` so the browser's local date decides what is "due today".
 
+## Backups
+
+Your data is one SQLite file, so it is snapshotted automatically:
+
+- **Daily snapshots** go to `backend/data/backups/finance-YYYY-MM-DD.db`: one when the server starts and one before the first change of each day. The newest 14 are kept.
+- **Download** a copy any time with the download button in the header (or `GET /api/backup`).
+- **Keep copies off this disk** by pointing `FT_BACKUP_DIR` at a synced folder, e.g. `FT_BACKUP_DIR=~/Library/Mobile\ Documents/com~apple~CloudDocs/finance-backups`.
+- Settings: `FT_BACKUP_KEEP=30` keeps more, `FT_BACKUP=0` turns snapshots off.
+
+By hand, from `backend/`:
+```bash
+python -m app.backup                                         # snapshot now
+python -m app.backup --list                                  # newest first
+python -m app.backup --restore data/backups/finance-2026-11-01.db   # stop the server first
+```
+Restoring checks the file is a healthy database and saves the current one as `finance.before-restore.db` first.
+
 ## Tests
 ```bash
-cd backend && python -m pytest        # 35 tests: recurrence, projections, pay/undo, urgency, summary, variance, seed
+cd backend && python -m pytest        # 40 tests: recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
 cd frontend && npm test               # 21 tests: maths, formatting, and the full UI against a fake API
 ```

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
-from . import db
+from . import backup, db
 from .recurrence import next_due
 from .schemas import (
     BudgetIn, BudgetOut, ExpenseIn, ExpenseOut, SettingsIn, SettingsOut,
@@ -33,6 +36,7 @@ async def lifespan(_: FastAPI):
             seed_if_empty(conn)
         finally:
             conn.close()
+    backup.backup_if_due()
     yield
 
 
@@ -45,6 +49,14 @@ app.add_middleware(
 )
 
 Conn = Depends(db.get_conn)
+
+
+@app.middleware("http")
+async def daily_backup(request: Request, call_next):
+    """Snapshot the database before the first change of each day (the server may run for weeks)."""
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/"):
+        backup.backup_if_due()
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------- helpers
@@ -434,6 +446,19 @@ def variance(
         total_actual=total_actual,
         total_variance=_r(total_target - total_actual),
         unbudgeted_actual=_r(sum(r.actual for r in rows if r.target is None)),
+    )
+
+
+@app.get("/api/backup")
+def download_backup():
+    """A fresh copy of the whole database as a .db file."""
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    backup.snapshot(Path(tmp))
+    return FileResponse(
+        tmp, media_type="application/vnd.sqlite3",
+        filename=f"finance-{date.today().isoformat()}.db",
+        background=BackgroundTask(os.unlink, tmp),
     )
 
 

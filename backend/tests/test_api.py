@@ -343,3 +343,71 @@ def test_seeded_app_end_to_end(tmp_path, monkeypatch):
         oct_var = c.get("/api/variance", params={"month": "2026-10", **T}).json()
         food = next(r for r in oct_var["rows"] if r["category"] == "Food")
         assert food["status"] == "over" and food["variance"] == -1600
+
+
+# ------------------------------------------------------------- backups
+
+def _names(path):
+    with sqlite3.connect(path) as c:
+        return [r[0] for r in c.execute("SELECT name FROM expenses ORDER BY id")]
+
+
+def test_backup_once_a_day_and_pruned(client, tmp_path, monkeypatch):
+    from app import backup
+
+    monkeypatch.setenv("FT_BACKUP_KEEP", "3")
+    day = date(2027, 1, 1)  # clear of the startup snapshot, which uses the real date
+    mk(client, name="Rent")
+    first = backup.backup_if_due(day)
+    assert first == tmp_path / "backups" / "finance-2027-01-01.db"
+    assert _names(first) == ["Rent"]
+    mk(client, name="Gym")
+    assert backup.backup_if_due(day) is None  # already have today's
+    assert _names(first) == ["Rent"]
+    for i in range(1, 5):
+        backup.backup_if_due(day + timedelta(days=i))
+    assert [p.name for p in backup.list_backups()] == [
+        "finance-2027-01-05.db", "finance-2027-01-04.db", "finance-2027-01-03.db"]
+
+
+def test_first_write_of_the_day_takes_a_backup_first(client, tmp_path):
+    from app import backup
+
+    for f in backup.list_backups():  # the startup snapshot
+        f.unlink()
+    mk(client, name="Rent")
+    (snap,) = backup.list_backups()
+    assert _names(snap) == []  # the state before today's first change
+
+
+def test_backup_can_be_disabled(client, monkeypatch):
+    from app import backup
+
+    monkeypatch.setenv("FT_BACKUP", "0")
+    assert backup.backup_if_due(TODAY + timedelta(days=1)) is None
+
+
+def test_restore_saves_current_db_first(client, tmp_path):
+    from app import backup
+
+    mk(client, name="Rent")
+    snap = backup.backup_if_due(TODAY + timedelta(days=1))
+    mk(client, name="Oops")
+    saved = backup.restore(snap)
+    assert _names(db.db_path()) == ["Rent"]
+    assert _names(saved) == ["Rent", "Oops"]
+    junk = tmp_path / "junk.db"
+    junk.write_text("not a database")
+    assert backup.main(["--restore", str(junk)]) == 1
+    assert _names(db.db_path()) == ["Rent"]
+
+
+def test_download_backup(client, tmp_path):
+    mk(client, name="Rent")
+    r = client.get("/api/backup")
+    assert r.status_code == 200
+    assert r.content.startswith(b"SQLite format 3")
+    assert 'filename="finance-' in r.headers["content-disposition"]
+    out = tmp_path / "dl.db"
+    out.write_bytes(r.content)
+    assert _names(out) == ["Rent"]
