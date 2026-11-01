@@ -140,11 +140,8 @@ def register(body: NewAccount, request: Request, response: Response,
         raise HTTPException(409, "An account with this email already exists")
     uid = conn.execute("INSERT INTO users (email, password_hash) VALUES (?,?)",
                        (body.email, hash_password(body.password))).lastrowid
-    if first:
-        # Data from before accounts existed belongs to whoever sets the server up.
-        for table in ("expenses", "budgets", "settings"):
-            conn.execute(f"UPDATE {table} SET user_id=? WHERE user_id IS NULL", (uid,))
-    elif os.environ.get("FT_SEED", "0") == "1":
+    # Every account starts empty: nobody inherits data that existed before them.
+    if os.environ.get("FT_SEED", "0") == "1":
         from .seed import seed_demo
         seed_demo(conn, uid)
     conn.commit()

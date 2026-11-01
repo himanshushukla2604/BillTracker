@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS expenses (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL only for pre-account data
+    user_id        INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL only for pre-account rows (hidden)
     name           TEXT    NOT NULL,
     amount         REAL    NOT NULL CHECK (amount > 0),
     due_date       TEXT    NOT NULL,              -- ISO date
@@ -89,8 +89,8 @@ def init_db() -> None:
 
 
 def _migrate_to_accounts(conn: sqlite3.Connection) -> None:
-    """v0 -> v1: give every table an owner. Existing rows keep user_id NULL until the
-    first account is registered, which adopts them. A copy of the old file is kept."""
+    """v0 -> v1: give every table an owner column. Rows from before accounts existed keep
+    user_id NULL, so no account can see them. A copy of the old file is kept."""
     path = db_path()
     if path != ":memory:":
         saved = Path(path).with_name(Path(path).stem + ".pre-accounts.db")

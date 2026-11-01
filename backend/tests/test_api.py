@@ -335,9 +335,8 @@ def test_seed_demo_data():
 
 
 def test_seeded_app_end_to_end(app_, monkeypatch):
+    monkeypatch.setenv("FT_SEED", "1")
     with TestClient(app_) as c:
-        signup(c, "owner@example.com")  # the first account adopts pre-account data, so seed the second
-        monkeypatch.setenv("FT_SEED", "1")
         me = signup(c)
         # registration seeds with the real date, so re-seed deterministically
         conn = db.connect()
@@ -538,7 +537,7 @@ def test_signups_can_be_closed_except_for_the_first_account(app_, monkeypatch):
         assert r.status_code == 403
 
 
-def test_existing_data_is_migrated_and_adopted_by_the_first_account(tmp_path, monkeypatch):
+def test_existing_data_is_migrated_but_no_account_inherits_it(tmp_path, monkeypatch):
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
     old.executescript("""
@@ -565,10 +564,20 @@ def test_existing_data_is_migrated_and_adopted_by_the_first_account(tmp_path, mo
         assert (tmp_path / "old.pre-accounts.db").exists()
         signup(owner, "owner@example.com")
         signup(second, "second@example.com")
-        assert [e["name"] for e in owner.get("/api/expenses", params=T).json()] == ["Rent"]
-        assert owner.get("/api/budgets").json() == [{"category": "Rent", "monthly_target": 1000}]
-        assert owner.get("/api/settings").json()["total_budget"] == 5000
-        assert second.get("/api/expenses", params=T).json() == []
+        for c in (owner, second):
+            assert c.get("/api/expenses", params=T).json() == []
+            assert c.get("/api/budgets").json() == []
+            assert c.get("/api/settings").json()["total_budget"] == 0
     conn = sqlite3.connect(path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM expenses WHERE user_id IS NULL").fetchone()[0] == 1  # kept, hidden
     conn.close()
+
+
+def test_every_new_account_starts_empty(app_):
+    with TestClient(app_) as first, TestClient(app_) as second:
+        signup(first, "first@example.com")
+        mk(first, name="Rent")
+        signup(second, "second@example.com")
+        assert second.get("/api/expenses", params=T).json() == []
+        assert second.get("/api/summary", params=T).json()["scheduled_total"] == 0

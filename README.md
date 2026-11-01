@@ -35,13 +35,13 @@ committed to git, so cloning the repo gives nobody your data.
 Everyone registers (email + password) and logs in; each account only ever sees its own bills,
 targets and budget. Someone else's expense id simply returns 404.
 
-- **First account adopts existing data.** If you used the app before accounts existed, the first
-  account registered on that server takes ownership of those bills. (The pre-accounts database is
-  kept as `finance.pre-accounts.db`.) So register your own account first.
-- **Close sign-ups** after creating your account with `FT_REGISTRATION=0` (the first account can
-  always be created).
-- New accounts start empty. `FT_SEED=1` gives each new account demo data (JioAirFiber, EatClub,
-  Claude Pro, SIPs, credit cards, rent...).
+- **Every new account starts empty.** `FT_SEED=1` gives each new account demo data instead
+  (JioAirFiber, EatClub, Claude Pro, SIPs, credit cards, rent...).
+- Logins are stored in the `users` table of the same database (email + password hash).
+- Any email address can register; it is not verified. Once your own account exists, close sign-ups
+  with `FT_REGISTRATION=0` (the first account can always be created).
+- Data from before accounts existed is hidden from everyone; the pre-accounts database is kept as
+  `finance.pre-accounts.db`.
 - Passwords are hashed with PBKDF2-SHA256 (600k iterations). Sessions last 30 days in an HttpOnly,
   SameSite=Lax cookie; only a hash of the session token is stored. Logins lock for 15 minutes
   after 10 wrong passwords for an email.
