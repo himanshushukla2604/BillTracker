@@ -27,9 +27,26 @@ cd frontend && npm run build
 # then open http://localhost:8010
 ```
 
-The first launch seeds **demo data** (JioAirFiber, EatClub, Claude Pro, SIPs, credit cards, rent...).
-All amounts are placeholders: edit or delete them in the UI. Seeding runs once; set `FT_SEED=0` to
-skip it. The database lives at `backend/data/finance.db` (override with `FT_DB=/path/to.db`).
+The database lives at `backend/data/finance.db` (override with `FT_DB=/path/to.db`). It is never
+committed to git, so cloning the repo gives nobody your data.
+
+## Accounts
+
+Everyone registers (email + password) and logs in; each account only ever sees its own bills,
+targets and budget. Someone else's expense id simply returns 404.
+
+- **First account adopts existing data.** If you used the app before accounts existed, the first
+  account registered on that server takes ownership of those bills. (The pre-accounts database is
+  kept as `finance.pre-accounts.db`.) So register your own account first.
+- **Close sign-ups** after creating your account with `FT_REGISTRATION=0` (the first account can
+  always be created).
+- New accounts start empty. `FT_SEED=1` gives each new account demo data (JioAirFiber, EatClub,
+  Claude Pro, SIPs, credit cards, rent...).
+- Passwords are hashed with PBKDF2-SHA256 (600k iterations). Sessions last 30 days in an HttpOnly,
+  SameSite=Lax cookie; only a hash of the session token is stored. Logins lock for 15 minutes
+  after 10 wrong passwords for an email.
+- Serve it over HTTPS if it is reachable beyond your own machine; the cookie is marked Secure
+  automatically when the request is HTTPS.
 
 ## What's in the dashboard
 
@@ -46,6 +63,7 @@ skip it. The database lives at `backend/data/finance.db` (override with `FT_DB=/
 
 ## API (see `/docs` for the interactive version)
 
+`POST /api/auth/register|login|logout` · `GET /api/auth/me` · `GET /api/export` ·
 `GET/POST /api/expenses` · `PUT/DELETE /api/expenses/{id}` · `POST /api/expenses/{id}/pay|unpay` ·
 `GET /api/upcoming?days=` · `GET /api/summary?month=YYYY-MM` · `GET /api/variance?month=YYYY-MM` ·
 `GET/PUT /api/settings` · `GET /api/budgets` · `PUT/DELETE /api/budgets/{category}` · `GET /api/categories`
@@ -57,7 +75,8 @@ Date-sensitive endpoints take an optional `today=YYYY-MM-DD` so the browser's lo
 Your data is one SQLite file, so it is snapshotted automatically:
 
 - **Daily snapshots** go to `backend/data/backups/finance-YYYY-MM-DD.db`: one when the server starts and one before the first change of each day. The newest 14 are kept.
-- **Download** a copy any time with the download button in the header (or `GET /api/backup`).
+- **Download your own data** as JSON with the download button in the header (`GET /api/export`).
+  The daily snapshots above hold every account, so they stay on the server.
 - **Keep copies off this disk** by pointing `FT_BACKUP_DIR` at a synced folder, e.g. `FT_BACKUP_DIR=~/Library/Mobile\ Documents/com~apple~CloudDocs/finance-backups`.
 - Settings: `FT_BACKUP_KEEP=30` keeps more, `FT_BACKUP=0` turns snapshots off.
 
@@ -71,6 +90,6 @@ Restoring checks the file is a healthy database and saves the current one as `fi
 
 ## Tests
 ```bash
-cd backend && python -m pytest        # 40 tests: recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
-cd frontend && npm test               # 21 tests: maths, formatting, and the full UI against a fake API
+cd backend && python -m pytest        # 49 tests: accounts & isolation, recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
+cd frontend && npm test               # 25 tests: maths, formatting, login, and the full UI against a fake API
 ```

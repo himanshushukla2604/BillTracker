@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Download, Moon, Plus, Sun, CheckCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, LogOut, Moon, Plus, Sun, CheckCheck } from 'lucide-react';
 import { api } from './lib/api';
 import { ALERT_DAYS, computeVariance, summarize } from './lib/calc';
 import { daysInMonth, localISO, monthLabel, parseISO, shiftMonth } from './lib/format';
 import { useTheme } from './lib/theme';
 import AlertBanner from './components/AlertBanner';
+import AuthScreen from './components/AuthScreen';
 import BudgetsModal from './components/BudgetsModal';
 import ExpenseForm from './components/ExpenseForm';
 import ExpenseList from './components/ExpenseList';
@@ -15,7 +16,30 @@ import VarianceModule from './components/VarianceModule';
 
 const EMPTY = { expenses: [], upcoming: [], budgets: [], categories: [] };
 
+/** Everything sits behind a login; each account only ever sees its own data. */
 export default function App() {
+  const [user, setUser] = useState(undefined); // undefined while checking the session
+  const [startError, setStartError] = useState('');
+  const signedOut = useCallback(() => setUser(null), []);
+
+  useEffect(() => {
+    api.me().then(setUser, (e) => {
+      if (e.status !== 401) setStartError(e.message);
+      setUser(null);
+    });
+  }, []);
+
+  if (user === undefined) return <p className="mt-16 text-center text-sm text-stone-500" role="status">Loading…</p>;
+  if (!user) return <AuthScreen onAuthed={setUser} initialError={startError} />;
+
+  const logout = async () => {
+    try { await api.logout(); } catch { /* the cookie is gone either way once the session ends */ }
+    setUser(null);
+  };
+  return <Dashboard key={user.id} user={user} onLogout={logout} onSessionLost={signedOut} />;
+}
+
+function Dashboard({ user, onLogout, onSessionLost }) {
   const [dark, toggleTheme] = useTheme();
   const todayISO = localISO();
   const currentMonth = todayISO.slice(0, 7);
@@ -42,11 +66,12 @@ export default function App() {
       if (!budgetDirty.current) setTotalBudget(settings.total_budget);
       setError(null);
     } catch (e) {
+      if (e.status === 401) return onSessionLost();
       setError(e.message);
     } finally {
       setLoaded(true);
     }
-  }, [month, days]);
+  }, [month, days, onSessionLost]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => () => clearTimeout(budgetTimer.current), []);
@@ -78,6 +103,7 @@ export default function App() {
       await refresh();
       if (msg) setToast({ msg, undo });
     } catch (e) {
+      if (e.status === 401) return onSessionLost();
       setToast({ msg: e.message, error: true });
     }
   };
@@ -128,11 +154,13 @@ export default function App() {
           </span>
           <div>
             <h1 className="text-lg font-bold leading-tight">Bill Tracker</h1>
-            <p className="text-xs text-stone-500 dark:text-stone-400">{headerDate}</p>
+            <p className="text-xs text-stone-500 dark:text-stone-400">
+              {headerDate}<span className="hidden sm:inline"> · {user.email}</span>
+            </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center rounded-lg border border-stone-300 dark:border-neutral-700" role="group" aria-label="Month">
             <button className="btn-ghost rounded-r-none p-2" onClick={() => setMonth((m) => shiftMonth(m, -1))} aria-label="Previous month">
               <ChevronLeft className="h-4 w-4" />
@@ -150,10 +178,10 @@ export default function App() {
           </button>
           <a
             className="btn-outline p-2"
-            href="/api/backup"
+            href="/api/export"
             download
-            aria-label="Download a backup of your data"
-            title="Download backup"
+            aria-label="Download your data"
+            title="Download your data (JSON)"
           >
             <Download className="h-4 w-4" />
           </a>
@@ -165,6 +193,9 @@ export default function App() {
             title={dark ? 'Light mode' : 'Dark mode'}
           >
             {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+          <button className="btn-outline p-2" onClick={onLogout} aria-label={`Log out ${user.email}`} title={`Log out ${user.email}`}>
+            <LogOut className="h-4 w-4" />
           </button>
         </div>
       </header>
@@ -185,7 +216,7 @@ export default function App() {
       ) : (
         // On phones the wrappers dissolve (display: contents) so `order-*` interleaves the cards:
         // summary → timeline → variance → ledger. From lg up they become two real columns.
-        <main className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
+        <main className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
           <div className="contents lg:flex lg:flex-col lg:gap-5">
             <UpcomingTimeline
               className="order-2"

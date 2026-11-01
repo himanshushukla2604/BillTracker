@@ -23,12 +23,16 @@ async function req(method, path, { params = {}, body } = {}) {
         msg = j.detail.map((d) => `${d.loc?.slice(-1)[0] ?? 'field'}: ${d.msg}`).join('; ');
       }
     } catch { /* keep the status text */ }
-    throw new Error(msg);
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return res.status === 204 ? null : res.json();
 }
 
 export const api = {
+  me: () => req('GET', '/auth/me'),
+  login: (email, password) => req('POST', '/auth/login', { body: { email, password } }),
+  register: (email, password) => req('POST', '/auth/register', { body: { email, password } }),
+  logout: () => req('POST', '/auth/logout'),
   expenses: (month) => req('GET', '/expenses', { params: { month } }),
   upcoming: (days) => req('GET', '/upcoming', { params: { days } }),
   budgets: () => req('GET', '/budgets'),

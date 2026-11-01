@@ -22,7 +22,19 @@ function fakeFetch(url, init = {}) {
   const ok = (data, status = 200) =>
     Promise.resolve({ ok: true, status, statusText: 'OK', json: async () => data });
 
+  const fail = (status, detail) =>
+    Promise.resolve({ ok: false, status, statusText: 'Error', json: async () => ({ detail }) });
+
   const p = u.pathname;
+  if (p === '/api/auth/me') return store.user ? ok(store.user) : fail(401, 'Please log in');
+  if (p === '/api/auth/login') {
+    if (body.email !== 'me@example.com' || body.password !== 'correct horse') return fail(401, 'Wrong email or password');
+    store.user = { id: 1, email: body.email };
+    return ok(store.user);
+  }
+  if (p === '/api/auth/register') { store.user = { id: 2, email: body.email }; return ok(store.user, 201); }
+  if (p === '/api/auth/logout') { store.user = null; return ok(null, 204); }
+  if (!store.user) return fail(401, 'Please log in');
   if (p === '/api/expenses' && method === 'GET') {
     const month = u.searchParams.get('month');
     return ok([...store.expenses, ...store.projected].filter((e) => e.due_date.startsWith(month)).map(decorate));
@@ -53,6 +65,7 @@ beforeEach(() => {
   document.documentElement.classList.remove('dark');
   calls = [];
   store = {
+    user: { id: 1, email: 'me@example.com' },
     total: 50000,
     budgets: [
       { category: 'Food', monthly_target: 1000 },
@@ -188,6 +201,62 @@ it('validates and submits the add-expense form', async () => {
   });
   // 50,000 - 39,739 - 149
   await waitFor(() => expect(screen.getByTestId('remaining')).toHaveTextContent('₹10,112'));
+});
+
+it('asks for a login, then shows only after signing in', async () => {
+  const user = userEvent.setup();
+  store.user = null;
+  render(<App />);
+  const submit = async () => (await screen.findAllByRole('button', { name: 'Log in' })).at(-1);
+  await user.click(await submit());
+  expect(screen.getByText('Enter a valid email address')).toBeInTheDocument();
+  expect(screen.queryByText('Rent')).not.toBeInTheDocument();
+
+  await user.type(screen.getByLabelText('Email'), 'me@example.com');
+  await user.type(screen.getByLabelText('Password'), 'not it');
+  await user.click(await submit());
+  expect(await screen.findByRole('alert')).toHaveTextContent('Wrong email or password');
+
+  await user.clear(screen.getByLabelText('Password'));
+  await user.type(screen.getByLabelText('Password'), 'correct horse');
+  await user.click(await submit());
+  await screen.findByRole('region', { name: 'Upcoming bills' });
+  expect(rowsOf(timeline()).map((r) => r[0])).toContain('Rent');
+});
+
+it('creating an account checks the password length first', async () => {
+  const user = userEvent.setup();
+  store.user = null;
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: 'Create account' }));
+  await user.type(screen.getByLabelText('Email'), 'new@example.com');
+  await user.type(screen.getByLabelText('Password'), 'short');
+  await user.click(screen.getAllByRole('button', { name: 'Create account' }).at(-1));
+  expect(screen.getByText('Use at least 8 characters')).toBeInTheDocument();
+  expect(calls.some((c) => c.path === '/api/auth/register')).toBe(false);
+
+  await user.type(screen.getByLabelText('Password'), '-and-longer');
+  await user.click(screen.getAllByRole('button', { name: 'Create account' }).at(-1));
+  await screen.findByRole('region', { name: 'Upcoming bills' });
+  expect(calls.find((c) => c.path === '/api/auth/register').body).toEqual({
+    email: 'new@example.com', password: 'short-and-longer' });
+});
+
+it('logging out returns to the login screen and hides the data', async () => {
+  const user = userEvent.setup();
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: 'Log out me@example.com' }));
+  expect(await screen.findByLabelText('Password')).toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Upcoming bills' })).not.toBeInTheDocument();
+  expect(store.user).toBeNull();
+});
+
+it('an expired session sends you back to log in', async () => {
+  const user = userEvent.setup();
+  await renderApp();
+  store.user = null; // the server forgot the session
+  await user.click(within(timeline()).getByRole('button', { name: 'Mark Mobile Recharge as paid' }));
+  expect(await screen.findByLabelText('Password')).toBeInTheDocument();
 });
 
 it('shows a helpful message when the API is down', async () => {

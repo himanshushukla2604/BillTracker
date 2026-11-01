@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 import sqlite3
-import tempfile
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -10,17 +8,15 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import backup, db
+from . import auth, backup, db
 from .recurrence import next_due
 from .schemas import (
     BudgetIn, BudgetOut, ExpenseIn, ExpenseOut, SettingsIn, SettingsOut,
     Summary, Variance, VarianceRow,
 )
-from .seed import seed_if_empty
 
 ALERT_WINDOW_DAYS = 3  # bills due within this many days are colour-coded
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
@@ -30,12 +26,6 @@ MAX_PROJECTED = 600  # safety cap on occurrences rolled forward per bill
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
-    if os.environ.get("FT_SEED", "1") != "0":
-        conn = db.connect()
-        try:
-            seed_if_empty(conn)
-        finally:
-            conn.close()
     backup.backup_if_due()
     yield
 
@@ -48,7 +38,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+
 Conn = Depends(db.get_conn)
+Me = Depends(auth.current_user)  # every data route is scoped to the logged-in user
 
 
 @app.middleware("http")
@@ -106,7 +99,7 @@ def _to_out(row: sqlite3.Row, today: date) -> ExpenseOut:
     )
 
 
-def _projections(conn: sqlite3.Connection, start: date, end: date, today: date,
+def _projections(conn: sqlite3.Connection, uid: int, start: date, end: date, today: date,
                  category: Optional[str] = None) -> list[ExpenseOut]:
     """Future occurrences of recurring bills in [start, end) that are not stored yet.
 
@@ -115,7 +108,7 @@ def _projections(conn: sqlite3.Connection, start: date, end: date, today: date,
     Only dates from today on are projected; the past is whatever was recorded.
     """
     start = max(start, today)
-    sql, args = "SELECT * FROM expenses WHERE paid=0 AND recurring != 'none'", []
+    sql, args = "SELECT * FROM expenses WHERE user_id=? AND paid=0 AND recurring != 'none'", [uid]
     if category:
         sql += " AND category = ? COLLATE NOCASE"
         args.append(category)
@@ -141,15 +134,16 @@ def _chronological(items: list[ExpenseOut]) -> list[ExpenseOut]:
     return sorted(items, key=lambda e: (e.due_date, e.projected, e.id or e.projected_from))
 
 
-def _get_row(conn: sqlite3.Connection, expense_id: int) -> sqlite3.Row:
-    row = conn.execute("SELECT * FROM expenses WHERE id=?", (expense_id,)).fetchone()
+def _get_row(conn: sqlite3.Connection, uid: int, expense_id: int) -> sqlite3.Row:
+    """Someone else's expense is reported as missing, not forbidden, so ids reveal nothing."""
+    row = conn.execute("SELECT * FROM expenses WHERE id=? AND user_id=?", (expense_id, uid)).fetchone()
     if row is None:
         raise HTTPException(404, "Expense not found")
     return row
 
 
-def _total_budget(conn: sqlite3.Connection) -> float:
-    row = conn.execute("SELECT value FROM settings WHERE key='total_budget'").fetchone()
+def _total_budget(conn: sqlite3.Connection, uid: int) -> float:
+    row = conn.execute("SELECT value FROM settings WHERE user_id=? AND key='total_budget'", (uid,)).fetchone()
     return float(row["value"]) if row else 0.0
 
 
@@ -167,10 +161,11 @@ def list_expenses(
     projected: bool = True,
     today: Optional[date] = None,
     conn: sqlite3.Connection = Conn,
+    uid: int = Me,
 ):
     """Stored bills, plus projected recurring ones when a month is given (`projected=false` to skip)."""
     t = _today(today)
-    sql, args = "SELECT * FROM expenses WHERE 1=1", []
+    sql, args = "SELECT * FROM expenses WHERE user_id=?", [uid]
     if month:
         _, start, end = _month_bounds(month, t)
         sql += " AND due_date >= ? AND due_date < ?"
@@ -184,7 +179,7 @@ def list_expenses(
     sql += " ORDER BY due_date, id"
     items = [_to_out(r, t) for r in conn.execute(sql, args)]
     if month and projected and status != "paid":
-        items += _projections(conn, start, end, t, category)
+        items += _projections(conn, uid, start, end, t, category)
     return _chronological(items)
 
 
@@ -194,58 +189,62 @@ def upcoming(
     projected: bool = True,
     today: Optional[date] = None,
     conn: sqlite3.Connection = Conn,
+    uid: int = Me,
 ):
     """Unpaid bills in chronological order: everything overdue, then the next `days` days
     (including projected occurrences of recurring bills)."""
     t = _today(today)
     horizon = t + timedelta(days=days)
     rows = conn.execute(
-        "SELECT * FROM expenses WHERE paid=0 AND due_date <= ? ORDER BY due_date, id",
-        (horizon.isoformat(),),
+        "SELECT * FROM expenses WHERE user_id=? AND paid=0 AND due_date <= ? ORDER BY due_date, id",
+        (uid, horizon.isoformat()),
     )
     items = [_to_out(r, t) for r in rows]
     if projected:
-        items += _projections(conn, t, horizon + timedelta(days=1), t)
+        items += _projections(conn, uid, t, horizon + timedelta(days=1), t)
     return _chronological(items)
 
 
 @app.post("/api/expenses", response_model=ExpenseOut, status_code=201)
-def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.Connection = Conn):
+def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
+                   uid: int = Me):
     cur = conn.execute(
-        "INSERT INTO expenses (name, amount, due_date, category, recurring, anchor_day) VALUES (?,?,?,?,?,?)",
-        (body.name, _r(body.amount), body.due_date.isoformat(), body.category,
+        "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (uid, body.name, _r(body.amount), body.due_date.isoformat(), body.category,
          body.recurring, body.due_date.day),
     )
     conn.commit()
-    return _to_out(_get_row(conn, cur.lastrowid), _today(today))
+    return _to_out(_get_row(conn, uid, cur.lastrowid), _today(today))
 
 
 @app.put("/api/expenses/{expense_id}", response_model=ExpenseOut)
 def update_expense(expense_id: int, body: ExpenseIn, today: Optional[date] = None,
-                   conn: sqlite3.Connection = Conn):
-    _get_row(conn, expense_id)
+                   conn: sqlite3.Connection = Conn, uid: int = Me):
+    _get_row(conn, uid, expense_id)
     conn.execute(
         "UPDATE expenses SET name=?, amount=?, due_date=?, category=?, recurring=?, anchor_day=? WHERE id=?",
         (body.name, _r(body.amount), body.due_date.isoformat(), body.category,
          body.recurring, body.due_date.day, expense_id),
     )
     conn.commit()
-    return _to_out(_get_row(conn, expense_id), _today(today))
+    return _to_out(_get_row(conn, uid, expense_id), _today(today))
 
 
 @app.delete("/api/expenses/{expense_id}", status_code=204)
-def delete_expense(expense_id: int, conn: sqlite3.Connection = Conn):
-    _get_row(conn, expense_id)
+def delete_expense(expense_id: int, conn: sqlite3.Connection = Conn, uid: int = Me):
+    _get_row(conn, uid, expense_id)
     conn.execute("DELETE FROM expenses WHERE id=?", (expense_id,))
     conn.commit()
     return Response(status_code=204)
 
 
 @app.post("/api/expenses/{expense_id}/pay", response_model=ExpenseOut)
-def mark_paid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Connection = Conn):
+def mark_paid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
+              uid: int = Me):
     """Mark paid. Recurring bills automatically roll over to their next due date."""
     t = _today(today)
-    row = _get_row(conn, expense_id)
+    row = _get_row(conn, uid, expense_id)
     if not row["paid"]:
         conn.execute("UPDATE expenses SET paid=1, paid_on=? WHERE id=?", (t.isoformat(), expense_id))
         nxt = next_due(date.fromisoformat(row["due_date"]), row["recurring"], row["anchor_day"])
@@ -254,19 +253,20 @@ def mark_paid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Conne
         ).fetchone()
         if nxt and not has_child:
             conn.execute(
-                "INSERT INTO expenses (name, amount, due_date, category, recurring, anchor_day, generated_from)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (row["name"], row["amount"], nxt.isoformat(), row["category"],
+                "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day,"
+                " generated_from) VALUES (?,?,?,?,?,?,?,?)",
+                (uid, row["name"], row["amount"], nxt.isoformat(), row["category"],
                  row["recurring"], row["anchor_day"], expense_id),
             )
         conn.commit()
-    return _to_out(_get_row(conn, expense_id), t)
+    return _to_out(_get_row(conn, uid, expense_id), t)
 
 
 @app.post("/api/expenses/{expense_id}/unpay", response_model=ExpenseOut)
-def mark_unpaid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Connection = Conn):
+def mark_unpaid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
+                uid: int = Me):
     """Undo a payment, and remove the auto-created next occurrence if it is still unpaid."""
-    row = _get_row(conn, expense_id)
+    row = _get_row(conn, uid, expense_id)
     if row["paid"]:
         child = conn.execute("SELECT * FROM expenses WHERE generated_from=?", (expense_id,)).fetchone()
         if child is not None:
@@ -275,49 +275,53 @@ def mark_unpaid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Con
             conn.execute("DELETE FROM expenses WHERE id=?", (child["id"],))
         conn.execute("UPDATE expenses SET paid=0, paid_on=NULL WHERE id=?", (expense_id,))
         conn.commit()
-    return _to_out(_get_row(conn, expense_id), _today(today))
+    return _to_out(_get_row(conn, uid, expense_id), _today(today))
 
 
 # -------------------------------------------------- settings / budgets
 
 @app.get("/api/settings", response_model=SettingsOut)
-def get_settings(conn: sqlite3.Connection = Conn):
-    return SettingsOut(total_budget=_total_budget(conn))
+def get_settings(conn: sqlite3.Connection = Conn, uid: int = Me):
+    return SettingsOut(total_budget=_total_budget(conn, uid))
 
 
 @app.put("/api/settings", response_model=SettingsOut)
-def put_settings(body: SettingsIn, conn: sqlite3.Connection = Conn):
-    conn.execute("INSERT OR REPLACE INTO settings VALUES ('total_budget', ?)", (str(_r(body.total_budget)),))
+def put_settings(body: SettingsIn, conn: sqlite3.Connection = Conn, uid: int = Me):
+    conn.execute("INSERT OR REPLACE INTO settings (user_id, key, value) VALUES (?, 'total_budget', ?)",
+                 (uid, str(_r(body.total_budget))))
     conn.commit()
-    return SettingsOut(total_budget=_total_budget(conn))
+    return SettingsOut(total_budget=_total_budget(conn, uid))
 
 
 @app.get("/api/budgets", response_model=list[BudgetOut])
-def list_budgets(conn: sqlite3.Connection = Conn):
-    rows = conn.execute("SELECT category, monthly_target FROM budgets ORDER BY category COLLATE NOCASE")
+def list_budgets(conn: sqlite3.Connection = Conn, uid: int = Me):
+    rows = conn.execute("SELECT category, monthly_target FROM budgets WHERE user_id=? ORDER BY category COLLATE NOCASE",
+                        (uid,))
     return [BudgetOut(**dict(r)) for r in rows]
 
 
 @app.put("/api/budgets/{category}", response_model=BudgetOut)
-def put_budget(category: str, body: BudgetIn, conn: sqlite3.Connection = Conn):
+def put_budget(category: str, body: BudgetIn, conn: sqlite3.Connection = Conn, uid: int = Me):
     category = category.strip()
     if not category:
         raise HTTPException(422, "Category must not be blank")
     existing = conn.execute(
-        "SELECT category FROM budgets WHERE category = ? COLLATE NOCASE", (category,)
+        "SELECT category FROM budgets WHERE user_id=? AND category = ? COLLATE NOCASE", (uid, category)
     ).fetchone()
     if existing:
         category = existing["category"]
-        conn.execute("UPDATE budgets SET monthly_target=? WHERE category=?", (_r(body.monthly_target), category))
+        conn.execute("UPDATE budgets SET monthly_target=? WHERE user_id=? AND category=?",
+                     (_r(body.monthly_target), uid, category))
     else:
-        conn.execute("INSERT INTO budgets VALUES (?,?)", (category, _r(body.monthly_target)))
+        conn.execute("INSERT INTO budgets (user_id, category, monthly_target) VALUES (?,?,?)",
+                     (uid, category, _r(body.monthly_target)))
     conn.commit()
     return BudgetOut(category=category, monthly_target=_r(body.monthly_target))
 
 
 @app.delete("/api/budgets/{category}", status_code=204)
-def delete_budget(category: str, conn: sqlite3.Connection = Conn):
-    cur = conn.execute("DELETE FROM budgets WHERE category = ? COLLATE NOCASE", (category,))
+def delete_budget(category: str, conn: sqlite3.Connection = Conn, uid: int = Me):
+    cur = conn.execute("DELETE FROM budgets WHERE user_id=? AND category = ? COLLATE NOCASE", (uid, category))
     conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(404, "No target for that category")
@@ -325,10 +329,10 @@ def delete_budget(category: str, conn: sqlite3.Connection = Conn):
 
 
 @app.get("/api/categories", response_model=list[str])
-def categories(conn: sqlite3.Connection = Conn):
+def categories(conn: sqlite3.Connection = Conn, uid: int = Me):
     names: dict[str, str] = {}
     for table in ("budgets", "expenses"):
-        for r in conn.execute(f"SELECT DISTINCT category FROM {table}"):
+        for r in conn.execute(f"SELECT DISTINCT category FROM {table} WHERE user_id=?", (uid,)):
             names.setdefault(r["category"].lower(), r["category"])
     return sorted(names.values(), key=str.lower)
 
@@ -340,6 +344,7 @@ def summary(
     month: Optional[str] = Query(None, pattern=MONTH_PATTERN),
     today: Optional[date] = None,
     conn: sqlite3.Connection = Conn,
+    uid: int = Me,
 ):
     """Remaining budget = total budget minus everything dated in the month (paid, not yet paid,
     and projected recurring bills).
@@ -352,28 +357,29 @@ def summary(
     paid_total = unpaid_total = 0.0
     for r in conn.execute(
         "SELECT paid, COALESCE(SUM(amount),0) AS s FROM expenses"
-        " WHERE due_date >= ? AND due_date < ? GROUP BY paid",
-        (start.isoformat(), end.isoformat()),
+        " WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY paid",
+        (uid, start.isoformat(), end.isoformat()),
     ):
         if r["paid"]:
             paid_total = r["s"]
         else:
             unpaid_total = r["s"]
-    projected_total = sum(p.amount for p in _projections(conn, start, end, t))
+    projected_total = sum(p.amount for p in _projections(conn, uid, start, end, t))
     unpaid_total += projected_total
     scheduled = paid_total + unpaid_total
-    budget = _total_budget(conn)
+    budget = _total_budget(conn, uid)
 
     od = conn.execute(
-        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses WHERE paid=0 AND due_date < ?",
-        (t.isoformat(),),
+        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses WHERE user_id=? AND paid=0 AND due_date < ?",
+        (uid, t.isoformat()),
     ).fetchone()
     soon_end = t + timedelta(days=ALERT_WINDOW_DAYS)
     ds = conn.execute(
-        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses WHERE paid=0 AND due_date BETWEEN ? AND ?",
-        (t.isoformat(), soon_end.isoformat()),
+        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses"
+        " WHERE user_id=? AND paid=0 AND due_date BETWEEN ? AND ?",
+        (uid, t.isoformat(), soon_end.isoformat()),
     ).fetchone()
-    soon_projected = _projections(conn, t, soon_end + timedelta(days=1), t)
+    soon_projected = _projections(conn, uid, t, soon_end + timedelta(days=1), t)
 
     return Summary(
         month=month,
@@ -397,26 +403,27 @@ def variance(
     month: Optional[str] = Query(None, pattern=MONTH_PATTERN),
     today: Optional[date] = None,
     conn: sqlite3.Connection = Conn,
+    uid: int = Me,
 ):
     """Target vs actual per category. variance = target - actual: positive means under target."""
     t = _today(today)
     month, start, end = _month_bounds(month, t)
 
     targets: dict[str, tuple[str, float]] = {}
-    for r in conn.execute("SELECT category, monthly_target FROM budgets"):
+    for r in conn.execute("SELECT category, monthly_target FROM budgets WHERE user_id=?", (uid,)):
         targets[r["category"].lower()] = (r["category"], r["monthly_target"])
 
     actuals: dict[str, dict] = {}
     for r in conn.execute(
         "SELECT category, SUM(amount) AS actual, SUM(CASE WHEN paid=1 THEN amount ELSE 0 END) AS paid"
-        " FROM expenses WHERE due_date >= ? AND due_date < ? GROUP BY category",
-        (start.isoformat(), end.isoformat()),
+        " FROM expenses WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY category",
+        (uid, start.isoformat(), end.isoformat()),
     ):
         key = r["category"].lower()
         slot = actuals.setdefault(key, {"name": r["category"], "actual": 0.0, "paid": 0.0})
         slot["actual"] += r["actual"]
         slot["paid"] += r["paid"]
-    for p in _projections(conn, start, end, t):
+    for p in _projections(conn, uid, start, end, t):
         slot = actuals.setdefault(p.category.lower(), {"name": p.category, "actual": 0.0, "paid": 0.0})
         slot["actual"] += p.amount
 
@@ -449,17 +456,21 @@ def variance(
     )
 
 
-@app.get("/api/backup")
-def download_backup():
-    """A fresh copy of the whole database as a .db file."""
-    fd, tmp = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    backup.snapshot(Path(tmp))
-    return FileResponse(
-        tmp, media_type="application/vnd.sqlite3",
-        filename=f"finance-{date.today().isoformat()}.db",
-        background=BackgroundTask(os.unlink, tmp),
-    )
+@app.get("/api/export")
+def export(conn: sqlite3.Connection = Conn, uid: int = Me):
+    """Everything in your account as a JSON download. (Server-wide backups are in backup.py.)"""
+    def rows(sql: str) -> list[dict]:
+        return [dict(r) for r in conn.execute(sql, (uid,))]
+
+    data = {
+        "exported_on": date.today().isoformat(),
+        "expenses": rows("SELECT id, name, amount, due_date, category, recurring, anchor_day, paid, paid_on,"
+                         " generated_from FROM expenses WHERE user_id=? ORDER BY due_date, id"),
+        "budgets": rows("SELECT category, monthly_target FROM budgets WHERE user_id=? ORDER BY category"),
+        "settings": {r["key"]: r["value"] for r in rows("SELECT key, value FROM settings WHERE user_id=?")},
+    }
+    return JSONResponse(data, headers={
+        "Content-Disposition": f'attachment; filename="bill-tracker-{date.today().isoformat()}.json"'})
 
 
 @app.get("/api/health")

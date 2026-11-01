@@ -1,8 +1,7 @@
-"""Demo data so the dashboard is useful on first launch.
+"""Demo data for trying the dashboard out.
 
 Amounts are illustrative placeholders in INR - edit or delete them in the UI.
-Seeding runs once (tracked in the settings table), so deleting everything
-will not bring the demo data back. Disable entirely with FT_SEED=0.
+New accounts start empty; set FT_SEED=1 to give each new account this data.
 """
 from __future__ import annotations
 
@@ -47,24 +46,18 @@ BUDGETS = {
 TOTAL_BUDGET = 70000
 
 
-def _insert(conn, name, amount, due, category, recurring, anchor, paid, paid_on=None, parent=None) -> int:
-    cur = conn.execute(
-        "INSERT INTO expenses (name, amount, due_date, category, recurring, anchor_day, paid, paid_on, generated_from)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
-        (name, amount, due.isoformat(), category, recurring, anchor, int(paid),
-         paid_on.isoformat() if paid_on else None, parent),
-    )
-    return cur.lastrowid
-
-
-def seed_if_empty(conn: sqlite3.Connection, today: date | None = None) -> bool:
+def seed_demo(conn: sqlite3.Connection, user_id: int, today: date | None = None) -> None:
+    """Fill one account with demo bills, targets and a budget. The caller commits."""
     today = today or date.today()
-    if conn.execute("SELECT 1 FROM settings WHERE key='seeded'").fetchone():
-        return False
-    if conn.execute("SELECT 1 FROM expenses LIMIT 1").fetchone():
-        conn.execute("INSERT OR REPLACE INTO settings VALUES ('seeded','1')")
-        conn.commit()
-        return False
+
+    def _insert(name, amount, due, category, recurring, anchor, paid, paid_on=None, parent=None) -> int:
+        cur = conn.execute(
+            "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day, paid,"
+            " paid_on, generated_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (user_id, name, amount, due.isoformat(), category, recurring, anchor, int(paid),
+             paid_on.isoformat() if paid_on else None, parent),
+        )
+        return cur.lastrowid
 
     this_month = date(today.year, today.month, 1)
     prev_month = add_months(this_month, -1)
@@ -76,7 +69,7 @@ def seed_if_empty(conn: sqlite3.Connection, today: date | None = None) -> bool:
         parent = None
         while True:
             paid = due < today
-            pid = _insert(conn, name, amount, due, category, rec, day, paid,
+            pid = _insert(name, amount, due, category, rec, day, paid,
                           due if paid else None, parent)
             if not paid:
                 break
@@ -84,16 +77,15 @@ def seed_if_empty(conn: sqlite3.Connection, today: date | None = None) -> bool:
             due = add_months(due, 1, day)
 
     name, amount, day, category, rec = OVERDUE_DEMO
-    _insert(conn, name, amount, add_months(prev_month, 0, day), category, rec, day, False)
+    _insert(name, amount, add_months(prev_month, 0, day), category, rec, day, False)
 
     for name, amount, (back, day), category in ONE_OFFS:
         due = add_months(this_month, -back, day)
         if due > today:  # never seed a "paid" expense in the future
             continue
-        _insert(conn, name, amount, due, category, "none", day, True, due)
+        _insert(name, amount, due, category, "none", day, True, due)
 
-    conn.executemany("INSERT INTO budgets VALUES (?,?)", BUDGETS.items())
-    conn.execute("INSERT OR REPLACE INTO settings VALUES ('total_budget', ?)", (str(TOTAL_BUDGET),))
-    conn.execute("INSERT OR REPLACE INTO settings VALUES ('seeded','1')")
-    conn.commit()
-    return True
+    conn.executemany("INSERT INTO budgets (user_id, category, monthly_target) VALUES (?,?,?)",
+                     [(user_id, c, t) for c, t in BUDGETS.items()])
+    conn.execute("INSERT OR REPLACE INTO settings (user_id, key, value) VALUES (?, 'total_budget', ?)",
+                 (user_id, str(TOTAL_BUDGET)))

@@ -12,19 +12,34 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import db  # noqa: E402
 from app.recurrence import add_months, next_due  # noqa: E402
-from app.seed import seed_if_empty  # noqa: E402
+from app import auth  # noqa: E402
+from app.seed import seed_demo  # noqa: E402
 
 TODAY = date(2026, 11, 1)
 T = {"today": TODAY.isoformat()}
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def app_(tmp_path, monkeypatch):
     monkeypatch.setenv("FT_DB", str(tmp_path / "t.db"))
     monkeypatch.setenv("FT_SEED", "0")
+    monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)  # keep tests fast
+    auth._failures.clear()
     from app.main import app
+    return app
 
-    with TestClient(app) as c:
+
+def signup(c, email="me@example.com", password="correct horse"):
+    r = c.post("/api/auth/register", json={"email": email, "password": password})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+@pytest.fixture()
+def client(app_):
+    """A client logged in as me@example.com."""
+    with TestClient(app_) as c:
+        signup(c)
         yield c
 
 
@@ -304,8 +319,8 @@ def test_seed_demo_data():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(db.SCHEMA)
-    assert seed_if_empty(conn, TODAY) is True
-    assert seed_if_empty(conn, TODAY) is False  # runs once
+    conn.execute("INSERT INTO users (email, password_hash) VALUES ('a@b.co', 'x')")
+    seed_demo(conn, 1, TODAY)
 
     unpaid = conn.execute("SELECT name, due_date FROM expenses WHERE paid=0 ORDER BY due_date").fetchall()
     names = [r["name"] for r in unpaid]
@@ -319,17 +334,16 @@ def test_seed_demo_data():
                         (TODAY.isoformat(),)).fetchone()[0] == 0
 
 
-def test_seeded_app_end_to_end(tmp_path, monkeypatch):
-    monkeypatch.setenv("FT_DB", str(tmp_path / "s.db"))
-    monkeypatch.setenv("FT_SEED", "1")
-    # lifespan seeds with the real date, so re-seed deterministically afterwards
-    from app.main import app
-
-    with TestClient(app) as c:
+def test_seeded_app_end_to_end(app_, monkeypatch):
+    with TestClient(app_) as c:
+        signup(c, "owner@example.com")  # the first account adopts pre-account data, so seed the second
+        monkeypatch.setenv("FT_SEED", "1")
+        me = signup(c)
+        # registration seeds with the real date, so re-seed deterministically
         conn = db.connect()
         conn.executescript("DELETE FROM expenses; DELETE FROM budgets; DELETE FROM settings;")
+        seed_demo(conn, me["id"], TODAY)
         conn.commit()
-        seed_if_empty(conn, TODAY)
         conn.close()
         s = c.get("/api/summary", params={"month": "2026-11", **T}).json()
         assert s["total_budget"] == 70000
@@ -384,14 +398,14 @@ def test_backup_can_be_disabled(client, monkeypatch):
     from app import backup
 
     monkeypatch.setenv("FT_BACKUP", "0")
-    assert backup.backup_if_due(TODAY + timedelta(days=1)) is None
+    assert backup.backup_if_due(date(2027, 6, 1)) is None
 
 
 def test_restore_saves_current_db_first(client, tmp_path):
     from app import backup
 
     mk(client, name="Rent")
-    snap = backup.backup_if_due(TODAY + timedelta(days=1))
+    snap = backup.backup_if_due(date(2027, 6, 1))  # clear of the real-date startup snapshot
     mk(client, name="Oops")
     saved = backup.restore(snap)
     assert _names(db.db_path()) == ["Rent"]
@@ -402,12 +416,159 @@ def test_restore_saves_current_db_first(client, tmp_path):
     assert _names(db.db_path()) == ["Rent"]
 
 
-def test_download_backup(client, tmp_path):
-    mk(client, name="Rent")
-    r = client.get("/api/backup")
+def test_export_contains_only_my_data(app_):
+    with TestClient(app_) as other:
+        signup(other, "other@example.com")
+        mk(other, name="Their rent")
+    with TestClient(app_) as c:
+        signup(c)
+        mk(c, name="Rent")
+        c.put("/api/settings", json={"total_budget": 500})
+        r = c.get("/api/export")
     assert r.status_code == 200
-    assert r.content.startswith(b"SQLite format 3")
-    assert 'filename="finance-' in r.headers["content-disposition"]
-    out = tmp_path / "dl.db"
-    out.write_bytes(r.content)
-    assert _names(out) == ["Rent"]
+    assert 'filename="bill-tracker-' in r.headers["content-disposition"]
+    data = r.json()
+    assert [e["name"] for e in data["expenses"]] == ["Rent"]
+    assert data["settings"] == {"total_budget": "500.0"}
+    assert "password_hash" not in r.text and "other@example.com" not in r.text
+
+
+# ---------------------------------------------------------------- auth
+
+def test_data_routes_need_login(app_):
+    with TestClient(app_) as c:
+        for method, path in [("GET", "/api/expenses"), ("GET", "/api/upcoming"), ("GET", "/api/summary"),
+                             ("GET", "/api/variance"), ("GET", "/api/budgets"), ("GET", "/api/settings"),
+                             ("GET", "/api/categories"), ("GET", "/api/export"), ("POST", "/api/expenses"),
+                             ("POST", "/api/expenses/1/pay"), ("DELETE", "/api/expenses/1"),
+                             ("PUT", "/api/settings"), ("GET", "/api/auth/me")]:
+            assert c.request(method, path).status_code == 401, (method, path)
+        assert c.get("/api/health").status_code == 200
+
+
+def test_users_cannot_see_or_touch_each_others_data(app_):
+    with TestClient(app_) as a, TestClient(app_) as b:
+        signup(a, "a@example.com")
+        signup(b, "b@example.com")
+        mine = mk(a, name="A rent", category="Rent", recurring="monthly")
+        a.put("/api/budgets/Rent", json={"monthly_target": 100})
+        a.put("/api/settings", json={"total_budget": 999})
+
+        assert b.get("/api/expenses", params=T).json() == []
+        assert b.get("/api/expenses", params={"month": "2026-12", **T}).json() == []  # no projections either
+        assert b.get("/api/upcoming", params=T).json() == []
+        assert b.get("/api/budgets").json() == []
+        assert b.get("/api/categories").json() == []
+        assert b.get("/api/settings").json()["total_budget"] == 0
+        assert b.get("/api/summary", params=T).json()["scheduled_total"] == 0
+        assert b.get("/api/variance", params=T).json()["rows"] == []
+        i = mine["id"]
+        body = {"name": "x", "amount": 1, "due_date": "2026-11-01", "category": "x"}
+        assert b.put(f"/api/expenses/{i}", params=T, json=body).status_code == 404
+        assert b.post(f"/api/expenses/{i}/pay", params=T).status_code == 404
+        assert b.post(f"/api/expenses/{i}/unpay", params=T).status_code == 404
+        assert b.delete(f"/api/expenses/{i}").status_code == 404
+        assert b.delete("/api/budgets/Rent").status_code == 404
+
+        # and A's data is untouched
+        assert [e["name"] for e in a.get("/api/expenses", params=T).json()] == ["A rent"]
+        assert a.get("/api/settings").json()["total_budget"] == 999
+
+
+def test_register_login_logout(app_):
+    with TestClient(app_) as c:
+        signup(c, "Me@Example.com ", "correct horse")
+        assert c.get("/api/auth/me").json()["email"] == "me@example.com"
+        assert c.post("/api/auth/logout").status_code == 204
+        assert c.get("/api/auth/me").status_code == 401
+
+        bad = c.post("/api/auth/login", json={"email": "me@example.com", "password": "wrong horse"})
+        assert bad.status_code == 401 and bad.json()["detail"] == "Wrong email or password"
+        nobody = c.post("/api/auth/login", json={"email": "nobody@example.com", "password": "whatever1"})
+        assert nobody.status_code == 401 and nobody.json()["detail"] == "Wrong email or password"
+        ok = c.post("/api/auth/login", json={"email": "ME@example.com", "password": "correct horse"})
+        assert ok.status_code == 200
+        cookie = ok.headers["set-cookie"].lower()
+        assert "httponly" in cookie and "samesite=lax" in cookie
+        assert c.get("/api/auth/me").status_code == 200
+
+
+def test_register_validation_and_duplicates(app_):
+    with TestClient(app_) as c:
+        assert c.post("/api/auth/register", json={"email": "nope", "password": "longenough"}).status_code == 422
+        assert c.post("/api/auth/register", json={"email": "a@b.co", "password": "short"}).status_code == 422
+        signup(c, "a@b.co")
+        dup = c.post("/api/auth/register", json={"email": "A@B.co", "password": "longenough"})
+        assert dup.status_code == 409
+
+
+def test_passwords_and_session_tokens_are_not_stored_in_plain_text(client):
+    conn = db.connect()
+    user = conn.execute("SELECT password_hash FROM users").fetchone()
+    token = client.cookies.get(auth.COOKIE)
+    stored = conn.execute("SELECT token_hash FROM sessions").fetchone()
+    conn.close()
+    assert "correct horse" not in user["password_hash"]
+    assert user["password_hash"].startswith("pbkdf2_sha256$")
+    assert token and stored["token_hash"] != token
+
+
+def test_expired_session_is_rejected(client):
+    conn = db.connect()
+    conn.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00+00:00'")
+    conn.commit()
+    conn.close()
+    assert client.get("/api/expenses").status_code == 401
+
+
+def test_login_is_throttled_after_repeated_failures(app_):
+    with TestClient(app_) as c:
+        signup(c)
+        for _ in range(auth.MAX_FAILURES):
+            c.post("/api/auth/login", json={"email": "me@example.com", "password": "wrong guess"})
+        r = c.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
+        assert r.status_code == 429
+
+
+def test_signups_can_be_closed_except_for_the_first_account(app_, monkeypatch):
+    monkeypatch.setenv("FT_REGISTRATION", "0")
+    with TestClient(app_) as c:
+        signup(c, "owner@example.com")
+        r = c.post("/api/auth/register", json={"email": "stranger@example.com", "password": "longenough"})
+        assert r.status_code == 403
+
+
+def test_existing_data_is_migrated_and_adopted_by_the_first_account(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            amount REAL NOT NULL, due_date TEXT NOT NULL, category TEXT NOT NULL,
+            recurring TEXT NOT NULL DEFAULT 'none', anchor_day INTEGER NOT NULL,
+            paid INTEGER NOT NULL DEFAULT 0, paid_on TEXT, generated_from INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX idx_expenses_due ON expenses(due_date);
+        CREATE TABLE budgets (category TEXT PRIMARY KEY, monthly_target REAL NOT NULL);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO expenses (name, amount, due_date, category, anchor_day) VALUES ('Rent', 900, '2026-11-05', 'Rent', 5);
+        INSERT INTO budgets VALUES ('Rent', 1000);
+        INSERT INTO settings VALUES ('total_budget', '5000'), ('seeded', '1');
+    """)
+    old.commit()
+    old.close()
+    monkeypatch.setenv("FT_DB", str(path))
+    monkeypatch.setenv("FT_SEED", "0")
+    monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)
+    from app.main import app
+
+    with TestClient(app) as owner, TestClient(app) as second:
+        assert (tmp_path / "old.pre-accounts.db").exists()
+        signup(owner, "owner@example.com")
+        signup(second, "second@example.com")
+        assert [e["name"] for e in owner.get("/api/expenses", params=T).json()] == ["Rent"]
+        assert owner.get("/api/budgets").json() == [{"category": "Rent", "monthly_target": 1000}]
+        assert owner.get("/api/settings").json()["total_budget"] == 5000
+        assert second.get("/api/expenses", params=T).json() == []
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn.close()
