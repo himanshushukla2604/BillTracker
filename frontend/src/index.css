@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* Dark mode is class-based so the toggle (and saved choice) wins over the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root { color-scheme: light; }
+:root.dark { color-scheme: dark; }
+
+@layer base {
+  body {
+    @apply bg-stone-50 text-stone-900 antialiased dark:bg-neutral-950 dark:text-stone-100;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  :focus-visible { @apply outline-2 outline-offset-2 outline-emerald-500; }
+}
+
+/* Shared building blocks (Tailwind v4 custom utilities, so they compose with variants). */
+@utility card {
+  @apply rounded-2xl border border-stone-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900;
+}
+
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors disabled:opacity-50;
+}
+
+@utility btn-primary {
+  @apply btn bg-emerald-600 text-white hover:bg-emerald-700;
+}
+
+@utility btn-ghost {
+  @apply btn text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-neutral-800;
+}
+
+@utility btn-outline {
+  @apply btn border border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-neutral-700 dark:text-stone-200 dark:hover:bg-neutral-800;
+}
+
+@utility input {
+  @apply w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 placeholder:text-stone-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-stone-100 dark:placeholder:text-neutral-500;
+}
+
+@utility label {
+  @apply mb-1 block text-xs font-medium text-stone-600 dark:text-stone-400;
+}
+
+@utility num {
+  font-variant-numeric: tabular-nums;
+}
