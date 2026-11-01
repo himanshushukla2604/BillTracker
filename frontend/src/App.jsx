@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Download, LogOut, Moon, Plus, Sun, CheckChec
 import { api } from './lib/api';
 import { ALERT_DAYS, computeVariance, summarize } from './lib/calc';
 import { daysInMonth, localISO, monthLabel, parseISO, shiftMonth } from './lib/format';
+import { withDefaults } from './lib/categories';
 import { useTheme } from './lib/theme';
 import AlertBanner from './components/AlertBanner';
 import AuthScreen from './components/AuthScreen';
@@ -77,6 +78,7 @@ function Dashboard({ user, onLogout, onSessionLost }) {
   useEffect(() => () => clearTimeout(budgetTimer.current), []);
 
   // ---- derived, recalculated instantly on every change
+  const categoryOptions = useMemo(() => withDefaults(data.categories), [data.categories]);
   const summary = useMemo(() => summarize(data.expenses, totalBudget), [data.expenses, totalBudget]);
   const variance = useMemo(() => computeVariance(data.expenses, data.budgets), [data.expenses, data.budgets]);
 
@@ -260,7 +262,7 @@ function Dashboard({ user, onLogout, onSessionLost }) {
       {form && (
         <ExpenseForm
           expense={form.expense}
-          categories={data.categories}
+          categories={categoryOptions}
           todayISO={todayISO}
           onSubmit={saveExpense}
           onClose={() => setForm(null)}
@@ -269,7 +271,7 @@ function Dashboard({ user, onLogout, onSessionLost }) {
       {showTargets && (
         <BudgetsModal
           budgets={data.budgets}
-          categories={data.categories}
+          categories={data.categories.length ? data.categories : categoryOptions}
           onSave={saveTargets}
           onClose={() => setShowTargets(false)}
         />

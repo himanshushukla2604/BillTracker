@@ -87,6 +87,21 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
             {categories.map((c) => <option key={c} value={c} />)}
           </datalist>
           {err('category')}
+          <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Suggested categories">
+            {categories.map((c) => {
+              const on = c.toLowerCase() === f.category.trim().toLowerCase();
+              return (
+                <button key={c} type="button" aria-pressed={on} onClick={() => setF((s) => ({ ...s, category: c }))}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                    on
+                      ? 'border-emerald-600 bg-emerald-50 font-medium text-emerald-800 dark:border-emerald-500 dark:bg-emerald-950 dark:text-emerald-200'
+                      : 'border-stone-300 text-stone-600 hover:bg-stone-100 dark:border-neutral-700 dark:text-stone-300 dark:hover:bg-neutral-800'
+                  }`}>
+                  {c}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <fieldset>

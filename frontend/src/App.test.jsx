@@ -259,6 +259,20 @@ it('an expired session sends you back to log in', async () => {
   expect(await screen.findByLabelText('Password')).toBeInTheDocument();
 });
 
+it('a brand-new account still gets category suggestions it can click', async () => {
+  const user = userEvent.setup();
+  store.expenses = [];
+  store.budgets = [];
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  const chips = within(dialog).getByRole('group', { name: 'Suggested categories' });
+  expect(within(chips).getAllByRole('button').map((b) => b.textContent)).toContain('Utilities');
+  await user.click(within(chips).getByRole('button', { name: 'Utilities' }));
+  expect(within(dialog).getByLabelText('Category')).toHaveValue('Utilities');
+  expect(within(chips).getByRole('button', { name: 'Utilities' })).toHaveAttribute('aria-pressed', 'true');
+});
+
 it('shows a helpful message when the API is down', async () => {
   globalThis.fetch = vi.fn(async () => { throw new TypeError('network'); });
   render(<App />);

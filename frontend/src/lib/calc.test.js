@@ -1,4 +1,5 @@
 import { computeVariance, summarize } from './calc';
+import { DEFAULT_CATEGORIES, withDefaults } from './categories';
 import { money, signedMoney, localISO, shiftMonth, dayLabel } from './format';
 
 const e = (name, amount, category, paid = false) => ({ name, amount, category, paid });
@@ -68,5 +69,17 @@ describe('format', () => {
   it('labels relative days', () => {
     expect(dayLabel('2026-11-01', '2026-11-01')).toBe('Today');
     expect(dayLabel('2026-11-02', '2026-11-01')).toBe('Tomorrow');
+  });
+});
+
+describe('withDefaults', () => {
+  it('keeps your categories first and skips defaults you already have, ignoring case', () => {
+    const out = withDefaults(['Pets', 'rent']);
+    expect(out.slice(0, 2)).toEqual(['Pets', 'rent']);
+    expect(out).not.toContain('Rent');
+    expect(out).toHaveLength(2 + DEFAULT_CATEGORIES.length - 1);
+  });
+  it('gives an empty account the defaults', () => {
+    expect(withDefaults([])).toEqual(DEFAULT_CATEGORIES);
   });
 });
