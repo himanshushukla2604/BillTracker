@@ -14,6 +14,9 @@
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     -webkit-tap-highlight-color: transparent;
   }
+  /* iOS Safari gives date fields a fixed native width that spills past the screen edge. */
+  input[type="date"] { appearance: none; min-width: 0; }
+  input[type="date"]::-webkit-date-and-time-value { text-align: left; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; }
   :focus-visible { @apply outline-2 outline-offset-2 outline-emerald-500; }

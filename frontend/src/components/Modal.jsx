@@ -20,7 +20,7 @@ export default function Modal({ title, onClose, children, wide = false }) {
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-label={title}>
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div
-        className={`card relative max-h-[92vh] w-full overflow-y-auto rounded-b-none shadow-xl sm:rounded-b-2xl ${
+        className={`card relative max-h-[92dvh] w-full overflow-y-auto overscroll-contain rounded-b-none shadow-xl sm:rounded-b-2xl ${
           wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'
         }`}
       >
@@ -30,7 +30,8 @@ export default function Modal({ title, onClose, children, wide = false }) {
             <X className="h-5 w-5" />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        {/* Bottom sheet on phones: keep the buttons above the home bar when installed. */}
+        <div className="p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">{children}</div>
       </div>
     </div>
   );

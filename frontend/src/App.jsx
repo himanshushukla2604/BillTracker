@@ -215,12 +215,12 @@ function Dashboard({ user, onLogout, onSessionLost }) {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           <div className="flex items-center rounded-lg border border-stone-300 dark:border-neutral-700" role="group" aria-label="Month">
             <button className="btn-ghost rounded-r-none p-2" onClick={() => setMonth((m) => shiftMonth(m, -1))} aria-label="Previous month">
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <span className="min-w-[8.5rem] px-1 text-center text-sm font-medium" aria-live="polite">{label}</span>
+            <span className="min-w-[7.5rem] px-1 sm:min-w-[8.5rem] text-center text-sm font-medium" aria-live="polite">{label}</span>
             <button className="btn-ghost rounded-l-none p-2" onClick={() => setMonth((m) => shiftMonth(m, 1))} aria-label="Next month">
               <ChevronRight className="h-4 w-4" />
             </button>
