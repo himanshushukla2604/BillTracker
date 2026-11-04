@@ -1,0 +1,13 @@
+# Never ship local data, secrets or build output into the image.
+.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+frontend/dist
+backend/data
+backend/tests
+*.db
+.env
+.env.*
+.claude

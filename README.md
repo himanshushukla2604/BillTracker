@@ -48,6 +48,11 @@ targets and budget. Someone else's expense id simply returns 404.
 - Serve it over HTTPS if it is reachable beyond your own machine; the cookie is marked Secure
   automatically when the request is HTTPS.
 
+## Use it on your phone
+
+To record expenses from your iPhone anywhere (laptop off), deploy it to Fly.io and add it to your home
+screen. It installs as an app with its own icon and opens full-screen. Step-by-step: **[DEPLOY.md](DEPLOY.md)**.
+
 ## What's in the dashboard
 
 | Feature | How it works |
@@ -58,12 +63,19 @@ targets and budget. Someone else's expense id simply returns 404.
 | **Remaining budget** | Widget = monthly budget − every bill dated in the month (paid + still to pay). Edit the budget in place and it updates as you type. |
 | **Data entry** | Add/edit form with name, amount, due date, category (autocomplete + free text), recurring (one-time / weekly / monthly / quarterly / yearly). |
 | **Recurring** | Marking a recurring bill paid creates the next occurrence (month-end safe: 31 Jan → 28 Feb → 31 Mar). Undo removes it again. |
+| **Payment mode** | Each expense can record how it was paid: cash, UPI, debit card, net banking or credit card, and for cards, which one. Add all your cards (credit and debit) in the Cards panel; debit cards are just named, since money leaves the bank right away. |
+| **Credit cards** | Add a card with its statement day and due day. Purchases charged to it count as spending in their own category on their date, and are grouped into that card's statements: everything up to the statement day is one bill, due on the due day. Card bills appear in Upcoming bills and alerts instead of each purchase, with a Pay button (partial payments via the API; Undo in the toast). Recurring card charges (subscriptions) are charged automatically as their date passes. Paying the bill is not counted as spending again. |
+| **EMIs** | Add an EMI to a card: monthly instalment, first instalment date, number of months. Each instalment lands on that month's statement and counts as spending in the EMI's category. The card panel shows, per card: bill due now, charged this cycle so far (and expected total), EMIs still to come, and the total owed, plus each EMI's progress and end month. |
+| **Money lent** | Record money you lend: who, how much, when, and optionally when you expect it back. Record repayments in parts until it closes. Pick a reminder schedule (daily, every 3 days, weekly, every 2 weeks, monthly; starting on the due date or a date you choose): when it is due, the banner says "Ask Rahul for ₹3,000 back" and a browser notification fires once a day while the app is open. "I've asked" moves the next reminder on by the interval. Lending never counts toward your budget. |
+| **Paid back to you** | When someone pays you back for part of a bill (e.g. a friend's purchase on your credit card), add the amount and who it was from on that bill. The bill still shows in full wherever it is about what you owe (timeline, alerts, amounts due), but only your own share counts toward remaining budget and category variance. It is not carried over to the next occurrence. |
 | **Projected bills** | Future occurrences of recurring bills show up (marked *Projected*) in later months, the timeline, the remaining budget and variance before they exist, so next month's numbers are complete. They become real once the bill before them is paid. Only dates from today on are projected; deleting the next occurrence ends the series. Pass `projected=false` to `/api/expenses` or `/api/upcoming` to leave them out. |
 | **Dark mode** | Toggle in the header; remembers your choice, defaults to the OS setting, no flash on load. |
 
 ## API (see `/docs` for the interactive version)
 
 `POST /api/auth/register|login|logout` · `GET /api/auth/me` · `GET /api/export` ·
+`GET/POST /api/loans` · `PUT/DELETE /api/loans/{id}` · `POST /api/loans/{id}/repayments|reminded` ·
+`GET/POST /api/cards` · `PUT/DELETE /api/cards/{id}` · `POST /api/cards/{id}/pay|unpay|emis` · `PUT/DELETE /api/emis/{id}` ·
 `GET/POST /api/expenses` · `PUT/DELETE /api/expenses/{id}` · `POST /api/expenses/{id}/pay|unpay` ·
 `GET /api/upcoming?days=` · `GET /api/summary?month=YYYY-MM` · `GET /api/variance?month=YYYY-MM` ·
 `GET/PUT /api/settings` · `GET /api/budgets` · `PUT/DELETE /api/budgets/{category}` · `GET /api/categories`
@@ -90,6 +102,6 @@ Restoring checks the file is a healthy database and saves the current one as `fi
 
 ## Tests
 ```bash
-cd backend && python -m pytest        # 49 tests: accounts & isolation, recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
-cd frontend && npm test               # 25 tests: maths, formatting, login, and the full UI against a fake API
+cd backend && python -m pytest        # 66 tests: accounts & isolation, loans, cards & EMIs, paid back, recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
+cd frontend && npm test               # 39 tests: maths, paid back, categories, loans, cards, login, and the full UI against a fake API
 ```
