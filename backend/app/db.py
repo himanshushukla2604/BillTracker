@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS expenses (
     user_id        INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL only for pre-account rows (hidden)
     name           TEXT    NOT NULL,
     amount         REAL    NOT NULL CHECK (amount > 0),
+    reimbursed     REAL    NOT NULL DEFAULT 0,    -- part someone else paid back to you
+    reimbursed_note TEXT,                          -- who / what for
     due_date       TEXT    NOT NULL,              -- ISO date
     category       TEXT    NOT NULL,
     recurring      TEXT    NOT NULL DEFAULT 'none',
@@ -40,6 +42,8 @@ CREATE TABLE IF NOT EXISTS expenses (
     paid           INTEGER NOT NULL DEFAULT 0,
     paid_on        TEXT,
     generated_from INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
+    payment_mode   TEXT,                           -- cash | upi | debit_card | net_banking | credit_card
+    card_id        INTEGER REFERENCES cards(id) ON DELETE SET NULL,  -- set when paid by credit card
     created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_user_due ON expenses(user_id, due_date);
@@ -52,6 +56,60 @@ CREATE TABLE IF NOT EXISTS budgets (
     PRIMARY KEY (user_id, category)
 );
 
+-- Credit cards: purchases charged to a card are grouped into statements by statement_day,
+-- each payable by due_day; EMIs add a fixed instalment to each statement for `months` months.
+CREATE TABLE IF NOT EXISTS cards (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name          TEXT    NOT NULL,
+    kind          TEXT    NOT NULL DEFAULT 'credit',  -- credit | debit (debit: days unused)
+    statement_day INTEGER NOT NULL CHECK (statement_day BETWEEN 1 AND 31),
+    due_day       INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
+    created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS emis (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    card_id        INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    name           TEXT    NOT NULL,
+    category       TEXT    NOT NULL,
+    monthly_amount REAL    NOT NULL CHECK (monthly_amount > 0),
+    first_date     TEXT    NOT NULL,              -- date of the first instalment
+    months         INTEGER NOT NULL CHECK (months > 0),
+    created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS card_payments (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    card_id        INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    statement_date TEXT    NOT NULL,
+    amount         REAL    NOT NULL CHECK (amount > 0),
+    paid_on        TEXT    NOT NULL
+);
+
+-- Money lent to someone, repaid in parts; reminders repeat every remind_every_days.
+CREATE TABLE IF NOT EXISTS loans (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    person            TEXT    NOT NULL,
+    amount            REAL    NOT NULL CHECK (amount > 0),
+    lent_on           TEXT    NOT NULL,
+    due_date          TEXT,                         -- when you expect it back (optional)
+    note              TEXT,
+    remind_every_days INTEGER,                      -- NULL = no reminders
+    next_remind_on    TEXT,
+    created_at        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS loan_repayments (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    loan_id INTEGER NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
+    amount  REAL    NOT NULL CHECK (amount > 0),
+    paid_on TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     key     TEXT NOT NULL,
@@ -59,7 +117,7 @@ CREATE TABLE IF NOT EXISTS settings (
     PRIMARY KEY (user_id, key)
 );
 """
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 def connect() -> sqlite3.Connection:
@@ -82,10 +140,29 @@ def init_db() -> None:
         if version == 0 and has_data:
             _migrate_to_accounts(conn)
         conn.executescript(SCHEMA)
+        _add_missing_columns(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
     finally:
         conn.close()
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Additive upgrades (v1 -> v2 paid-back amounts, v2 -> v3 payment modes, v3 -> v4 debit cards): older databases
+    just gain the columns."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(expenses)")}
+    if "reimbursed" not in have:
+        conn.execute("ALTER TABLE expenses ADD COLUMN reimbursed REAL NOT NULL DEFAULT 0")
+    if "reimbursed_note" not in have:
+        conn.execute("ALTER TABLE expenses ADD COLUMN reimbursed_note TEXT")
+    # v2 -> v3: how each expense was paid
+    if "payment_mode" not in have:
+        conn.execute("ALTER TABLE expenses ADD COLUMN payment_mode TEXT")
+    if "card_id" not in have:
+        conn.execute("ALTER TABLE expenses ADD COLUMN card_id INTEGER REFERENCES cards(id) ON DELETE SET NULL")
+    # v3 -> v4: debit cards
+    if "kind" not in {r[1] for r in conn.execute("PRAGMA table_info(cards)")}:
+        conn.execute("ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'credit'")
 
 
 def _migrate_to_accounts(conn: sqlite3.Connection) -> None:

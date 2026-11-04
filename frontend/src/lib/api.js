@@ -47,4 +47,22 @@ export const api = {
   setTarget: (category, monthly_target) =>
     req('PUT', `/budgets/${encodeURIComponent(category)}`, { body: { monthly_target } }),
   removeTarget: (category) => req('DELETE', `/budgets/${encodeURIComponent(category)}`),
+
+  loans: () => req('GET', '/loans'),
+  createLoan: (body) => req('POST', '/loans', { body }),
+  updateLoan: (id, body) => req('PUT', `/loans/${id}`, { body }),
+  removeLoan: (id) => req('DELETE', `/loans/${id}`),
+  repay: (id, body) => req('POST', `/loans/${id}/repayments`, { body }),
+  undoRepay: (id, repaymentId) => req('DELETE', `/loans/${id}/repayments/${repaymentId}`),
+  reminded: (id) => req('POST', `/loans/${id}/reminded`),
+
+  cards: () => req('GET', '/cards'),
+  createCard: (body) => req('POST', '/cards', { body }),
+  updateCard: (id, body) => req('PUT', `/cards/${id}`, { body }),
+  removeCard: (id) => req('DELETE', `/cards/${id}`),
+  payCard: (id, statement_date, amount) => req('POST', `/cards/${id}/pay`, { body: { statement_date, amount } }),
+  unpayCard: (id, statement_date) => req('POST', `/cards/${id}/unpay`, { body: { statement_date } }),
+  createEmi: (cardId, body) => req('POST', `/cards/${cardId}/emis`, { body }),
+  updateEmi: (id, body) => req('PUT', `/emis/${id}`, { body }),
+  removeEmi: (id) => req('DELETE', `/emis/${id}`),
 };

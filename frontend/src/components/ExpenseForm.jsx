@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { money } from '../lib/format';
+import { PAYMENT_MODES, cardKindFor } from '../lib/payment';
 import Modal from './Modal';
 
 const RECURRING = [
@@ -9,7 +11,7 @@ const RECURRING = [
   ['yearly', 'Yearly'],
 ];
 
-export default function ExpenseForm({ expense, categories, todayISO, onSubmit, onClose }) {
+export default function ExpenseForm({ expense, categories, cards = [], todayISO, onSubmit, onClose }) {
   const editing = Boolean(expense);
   const [f, setF] = useState({
     name: expense?.name ?? '',
@@ -17,7 +19,18 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
     due_date: expense?.due_date ?? todayISO,
     category: expense?.category ?? '',
     recurring: expense?.recurring ?? 'monthly',
+    reimbursed: expense?.reimbursed ? String(expense.reimbursed) : '',
+    reimbursed_note: expense?.reimbursed_note ?? '',
+    payment_mode: expense?.payment_mode ?? '',
+    card_id: expense?.card_id != null ? String(expense.card_id) : '',
   });
+  const kind = cardKindFor(f.payment_mode);
+  const choices = cards.filter((c) => c.kind === kind);
+  // a credit card must be chosen, so default to the first; a debit card is optional
+  const cardId = f.card_id && choices.some((c) => String(c.id) === f.card_id)
+    ? f.card_id
+    : kind === 'credit' && choices[0] ? String(choices[0].id) : '';
+  const [showBack, setShowBack] = useState(Boolean(expense?.reimbursed));
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -30,11 +43,16 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
   const submit = async (e) => {
     e.preventDefault();
     const amount = Number(f.amount.replace(/[,\s₹]/g, ''));
+    const backText = showBack ? f.reimbursed.replace(/[,\s₹]/g, '') : '';
+    const reimbursed = backText === '' ? 0 : Number(backText);
     const next = {};
     if (!f.name.trim()) next.name = 'Give this expense a name';
     if (!f.amount.trim() || !Number.isFinite(amount) || amount <= 0) next.amount = 'Enter an amount greater than 0';
     if (!f.due_date) next.due_date = 'Pick a due date';
     if (!f.category.trim()) next.category = 'Choose or type a category';
+    if (!Number.isFinite(reimbursed) || reimbursed < 0) next.reimbursed = 'Enter 0 or more';
+    else if (Number.isFinite(amount) && reimbursed > amount) next.reimbursed = 'Cannot be more than the amount';
+    if (kind === 'credit' && !cardId) next.card_id = 'Add a credit card in the Cards panel first';
     setErrors(next);
     if (Object.keys(next).length) return;
 
@@ -42,7 +60,12 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
     setFormError('');
     try {
       await onSubmit(
-        { name: f.name.trim(), amount, due_date: f.due_date, category: f.category.trim(), recurring: f.recurring },
+        {
+          name: f.name.trim(), amount, due_date: f.due_date, category: f.category.trim(), recurring: f.recurring,
+          ...(reimbursed > 0 ? { reimbursed, reimbursed_note: f.reimbursed_note.trim() || null } : {}),
+          payment_mode: f.payment_mode || null,
+          card_id: kind && cardId ? Number(cardId) : null,
+        },
         expense?.id,
       );
     } catch (err) {
@@ -79,6 +102,45 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
           </div>
         </div>
 
+        {showBack ? (
+          <fieldset className="rounded-xl border border-sky-200 bg-sky-50/60 p-3 dark:border-sky-900 dark:bg-sky-950/30">
+            <legend className="px-1 text-xs font-medium text-sky-800 dark:text-sky-300">Paid back to you</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="f-back">Amount paid back (₹)</label>
+                <input id="f-back" className="input num" inputMode="decimal" value={f.reimbursed}
+                  onChange={set('reimbursed')} placeholder="0.00" {...aria('reimbursed')} />
+                {err('reimbursed')}
+              </div>
+              <div>
+                <label className="label" htmlFor="f-back-note">From / for (optional)</label>
+                <input id="f-back-note" className="input" value={f.reimbursed_note} onChange={set('reimbursed_note')}
+                  placeholder="e.g. Rahul, flight tickets" maxLength={120} />
+              </div>
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-sky-900/80 dark:text-sky-200/80">
+              <span className="num">
+                {(() => {
+                  const a = Number(f.amount.replace(/[,\s₹]/g, ''));
+                  const b = Number(f.reimbursed.replace(/[,\s₹]/g, '') || 0);
+                  return Number.isFinite(a) && a > 0 && Number.isFinite(b) && b >= 0 && b <= a
+                    ? `Counts as ${money(a - b)} of your own spending; the full bill still shows as due.`
+                    : 'Only your own share counts against your budget.';
+                })()}
+              </span>
+              <button type="button" className="shrink-0 underline underline-offset-2"
+                onClick={() => { setShowBack(false); setErrors((e) => ({ ...e, reimbursed: undefined })); }}>
+                Remove
+              </button>
+            </div>
+          </fieldset>
+        ) : (
+          <button type="button" className="text-sm font-medium text-sky-700 underline-offset-2 hover:underline dark:text-sky-400"
+            onClick={() => setShowBack(true)}>
+            + Someone paid me back part of this
+          </button>
+        )}
+
         <div>
           <label className="label" htmlFor="f-cat">Category</label>
           <input id="f-cat" className="input" list="category-options" value={f.category} onChange={set('category')}
@@ -103,6 +165,33 @@ export default function ExpenseForm({ expense, categories, todayISO, onSubmit, o
             })}
           </div>
         </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="f-mode">Paid with</label>
+            <select id="f-mode" className="input" value={f.payment_mode} onChange={set('payment_mode')}>
+              <option value="">Not set</option>
+              {PAYMENT_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </div>
+          {kind && (
+            <div>
+              <label className="label" htmlFor="f-card">Card</label>
+              <select id="f-card" className="input" value={cardId} onChange={set('card_id')} {...aria('card_id')}
+                disabled={kind === 'credit' && !choices.length}>
+                {kind === 'debit' && <option value="">{choices.length ? 'Not saying' : 'No debit cards added'}</option>}
+                {kind === 'credit' && !choices.length && <option value="">No credit cards yet</option>}
+                {choices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {err('card_id')}
+            </div>
+          )}
+        </div>
+        {kind === 'credit' && choices.length > 0 && (
+          <p className="-mt-2 text-xs text-stone-500 dark:text-stone-400">
+            Counts as spending on its date and goes on that card&apos;s bill, so it isn&apos;t a separate bill to pay.
+          </p>
+        )}
 
         <fieldset>
           <legend className="label">Repeats</legend>

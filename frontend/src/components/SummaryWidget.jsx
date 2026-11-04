@@ -10,7 +10,7 @@ function parseAmount(text) {
 }
 
 export default function SummaryWidget({ summary, monthLabel, perDay, daysLeft, onBudgetChange, className = '' }) {
-  const { totalBudget, paid, unpaid, projected, remaining, percentCommitted } = summary;
+  const { totalBudget, paid, unpaid, projected, reimbursed, paidOwn, unpaidOwn, remaining, percentCommitted } = summary;
   const [text, setText] = useState(totalBudget ? String(totalBudget) : '');
   const inputRef = useRef(null);
 
@@ -27,8 +27,9 @@ export default function SummaryWidget({ summary, monthLabel, perDay, daysLeft, o
       ? 'text-amber-600 dark:text-amber-400'
       : 'text-emerald-600 dark:text-emerald-400';
 
-  const paidPct = totalBudget > 0 ? Math.min((paid / totalBudget) * 100, 100) : 0;
-  const unpaidPct = totalBudget > 0 ? Math.min((unpaid / totalBudget) * 100, 100 - paidPct) : 0;
+  // The bar shows budget used, so it counts your own share only.
+  const paidPct = totalBudget > 0 ? Math.min((paidOwn / totalBudget) * 100, 100) : 0;
+  const unpaidPct = totalBudget > 0 ? Math.min((unpaidOwn / totalBudget) * 100, 100 - paidPct) : 0;
 
   return (
     <section className={`card p-5 ${className}`} aria-labelledby="summary-h">
@@ -46,7 +47,7 @@ export default function SummaryWidget({ summary, monthLabel, perDay, daysLeft, o
         {totalBudget > 0
           ? over
             ? `${money(-remaining)} over your ${money(totalBudget)} budget`
-            : `left of ${money(totalBudget)} after all scheduled bills`
+            : `left of ${money(totalBudget)} after all scheduled bills${reimbursed > 0 ? ' and money paid back' : ''}`
           : 'Set a monthly budget below to see what is left'}
       </p>
 
@@ -82,6 +83,14 @@ export default function SummaryWidget({ summary, monthLabel, perDay, daysLeft, o
           <p className="-mt-1 pl-[1.125rem] text-xs text-stone-500 dark:text-stone-400">
             incl. {money(projected)} of projected recurring bills
           </p>
+        )}
+        {reimbursed > 0 && (
+          <div className="flex items-center justify-between" data-testid="paid-back">
+            <dt className="flex items-center gap-2 text-stone-600 dark:text-stone-300">
+              <span className="h-2.5 w-2.5 rounded-full border border-sky-500" /> Paid back to you
+            </dt>
+            <dd className="font-medium text-sky-700 dark:text-sky-400">−{money(reimbursed)}</dd>
+          </div>
         )}
         <div className="flex items-center justify-between gap-3 border-t border-stone-200 pt-3 dark:border-neutral-800">
           <dt>

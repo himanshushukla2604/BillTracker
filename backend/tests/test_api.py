@@ -581,3 +581,332 @@ def test_every_new_account_starts_empty(app_):
         signup(second, "second@example.com")
         assert second.get("/api/expenses", params=T).json() == []
         assert second.get("/api/summary", params=T).json()["scheduled_total"] == 0
+
+
+# ------------------------------------------------------------ paid back
+
+def test_paid_back_counts_against_bills_but_not_your_budget(client):
+    client.put("/api/settings", json={"total_budget": 10000})
+    client.put("/api/budgets/Credit Cards", json={"monthly_target": 8000})
+    card = client.post("/api/expenses", params=T, json={
+        "name": "HDFC Credit Card", "amount": 11000, "due_date": "2026-11-18", "category": "Credit Cards",
+        "reimbursed": 4000, "reimbursed_note": "  Rahul - flight  "}).json()
+    assert card["reimbursed"] == 4000 and card["reimbursed_note"] == "Rahul - flight"
+
+    s = client.get("/api/summary", params={"month": "2026-11", **T}).json()
+    assert s["scheduled_total"] == 11000 and s["unpaid_total"] == 11000  # you still owe the whole bill
+    assert s["reimbursed_total"] == 4000 and s["own_spend"] == 7000
+    assert s["remaining"] == 3000 and s["percent_committed"] == 70
+
+    v = client.get("/api/variance", params={"month": "2026-11", **T}).json()
+    row = v["rows"][0]
+    assert (row["actual"], row["reimbursed"], row["variance"], row["status"]) == (7000, 4000, 1000, "under")
+
+    client.post(f"/api/expenses/{card['id']}/pay", params=T)
+    s = client.get("/api/summary", params={"month": "2026-11", **T}).json()
+    assert s["paid_total"] == 11000 and s["remaining_after_paid"] == 3000
+
+
+def test_paid_back_is_validated_and_cleared(client):
+    base = {"name": "Card", "amount": 500, "due_date": "2026-11-05", "category": "Cards"}
+    too_much = client.post("/api/expenses", params=T, json={**base, "reimbursed": 501})
+    assert too_much.status_code == 422 and "more than the amount" in too_much.text
+    assert client.post("/api/expenses", params=T, json={**base, "reimbursed": -1}).status_code == 422
+    e = client.post("/api/expenses", params=T, json={**base, "reimbursed": 500, "reimbursed_note": "Asha"}).json()
+    assert e["reimbursed"] == 500
+    # editing it back to 0 drops the note too
+    e = client.put(f"/api/expenses/{e['id']}", params=T, json={**base, "reimbursed": 0, "reimbursed_note": "Asha"}).json()
+    assert e["reimbursed"] == 0 and e["reimbursed_note"] is None
+
+
+def test_next_occurrence_does_not_inherit_paid_back(client):
+    e = client.post("/api/expenses", params=T, json={
+        "name": "Card", "amount": 900, "due_date": "2026-11-01", "category": "Cards",
+        "recurring": "monthly", "reimbursed": 300}).json()
+    dec_projected = client.get("/api/expenses", params={"month": "2026-12", **T}).json()
+    assert [(x["amount"], x["reimbursed"]) for x in dec_projected] == [(900, 0)]
+    client.post(f"/api/expenses/{e['id']}/pay", params=T)
+    nxt = client.get("/api/expenses", params={"status": "unpaid", **T}).json()[0]
+    assert (nxt["amount"], nxt["reimbursed"], nxt["reimbursed_note"]) == (900, 0, None)
+
+
+def test_v1_database_gains_paid_back_columns(tmp_path, monkeypatch):
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path)
+    v1 = db.SCHEMA.replace("    reimbursed     REAL    NOT NULL DEFAULT 0,    -- part someone else paid back to you\n", "")
+    v1 = v1.replace("    reimbursed_note TEXT,                          -- who / what for\n", "")
+    assert "reimbursed" not in v1
+    old.executescript(v1)
+    old.execute("PRAGMA user_version = 1")
+    old.commit()
+    old.close()
+    monkeypatch.setenv("FT_DB", str(path))
+    monkeypatch.setenv("FT_SEED", "0")
+    monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)
+    from app.main import app
+
+    with TestClient(app) as c:
+        signup(c)
+        assert mk(c)["reimbursed"] == 0
+    conn = sqlite3.connect(path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(expenses)")}
+    assert {"reimbursed", "reimbursed_note", "payment_mode", "card_id"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn.close()
+
+
+# --------------------------------------------------------------- loans
+
+def lend(c, **kw):
+    body = {"person": "Rahul", "amount": 5000, "lent_on": "2026-10-20", **kw}
+    r = c.post("/api/loans", params=T, json=body)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_loan_partial_repayments_until_closed(client):
+    loan = lend(client, due_date="2026-11-30", note=" trip ")
+    assert (loan["outstanding"], loan["status"], loan["days_to_due"], loan["note"]) == (5000, "open", 29, "trip")
+    r = client.post(f"/api/loans/{loan['id']}/repayments", params=T, json={"amount": 2000})
+    assert r.status_code == 201 and r.json()["outstanding"] == 3000
+    assert r.json()["repayments"][0]["paid_on"] == "2026-11-01"
+    too_much = client.post(f"/api/loans/{loan['id']}/repayments", params=T, json={"amount": 3001})
+    assert too_much.status_code == 422
+    done = client.post(f"/api/loans/{loan['id']}/repayments", params=T,
+                       json={"amount": 3000, "paid_on": "2026-11-02"}).json()
+    assert (done["outstanding"], done["status"], done["repaid"]) == (0, "repaid", 5000)
+    # undoing a repayment reopens it
+    rid = done["repayments"][-1]["id"]
+    back = client.delete(f"/api/loans/{loan['id']}/repayments/{rid}", params=T).json()
+    assert back["status"] == "open" and back["outstanding"] == 3000
+    # the amount cannot drop below what was already repaid
+    body = {"person": "Rahul", "amount": 1000, "lent_on": "2026-10-20"}
+    assert client.put(f"/api/loans/{loan['id']}", params=T, json=body).status_code == 422
+
+
+def test_loan_reminders_repeat_until_repaid(client):
+    loan = lend(client, due_date="2026-11-05", remind_every_days=7)
+    assert loan["next_remind_on"] == "2026-11-05" and not loan["reminder_due"]  # first reminder on the due date
+    due = client.get("/api/loans", params={"today": "2026-11-06"}).json()[0]
+    assert due["reminder_due"] and due["overdue"] and due["days_to_due"] == -1
+    snoozed = client.post(f"/api/loans/{loan['id']}/reminded", params={"today": "2026-11-06"}).json()
+    assert snoozed["next_remind_on"] == "2026-11-13" and not snoozed["reminder_due"]
+    assert client.get("/api/loans", params={"today": "2026-11-13"}).json()[0]["reminder_due"]
+    client.post(f"/api/loans/{loan['id']}/repayments", params=T, json={"amount": 5000})
+    closed = client.get("/api/loans", params={"today": "2026-11-20"}).json()[0]
+    assert closed["status"] == "repaid" and not closed["reminder_due"] and closed["next_remind_on"] is None
+
+
+def test_loan_reminder_defaults_and_validation(client):
+    no_due = lend(client, remind_every_days=3)
+    assert no_due["next_remind_on"] == "2026-10-23"  # one interval after lending
+    custom = lend(client, person="Asha", remind_every_days=14, first_reminder_on="2026-11-02")
+    assert custom["next_remind_on"] == "2026-11-02"
+    quiet = lend(client, person="Dev")
+    assert quiet["next_remind_on"] is None
+    assert client.post(f"/api/loans/{quiet['id']}/reminded", params=T).status_code == 409
+    bad = client.post("/api/loans", params=T, json={"person": "X", "amount": 1, "lent_on": "2026-11-02",
+                                                    "due_date": "2026-11-01"})
+    assert bad.status_code == 422
+    # reminder-first ordering
+    order = [l["person"] for l in client.get("/api/loans", params=T).json()]
+    assert order[0] == "Rahul"  # its reminder (23 Oct) is due
+    # lending never touches the budget
+    assert client.get("/api/summary", params=T).json()["scheduled_total"] == 0
+
+
+def test_loans_are_private(app_):
+    with TestClient(app_) as a, TestClient(app_) as b:
+        signup(a, "a@example.com")
+        signup(b, "b@example.com")
+        loan = lend(a)
+        assert b.get("/api/loans", params=T).json() == []
+        assert b.post(f"/api/loans/{loan['id']}/repayments", params=T, json={"amount": 1}).status_code == 404
+        assert b.post(f"/api/loans/{loan['id']}/reminded", params=T).status_code == 404
+        assert b.delete(f"/api/loans/{loan['id']}").status_code == 404
+
+
+# --------------------------------------------------------------- cards
+
+def test_statement_cycle_maths():
+    from app.cards import due_for, statement_for
+    assert statement_for(date(2026, 11, 10), 15) == date(2026, 11, 15)
+    assert statement_for(date(2026, 11, 15), 15) == date(2026, 11, 15)
+    assert statement_for(date(2026, 11, 16), 15) == date(2026, 12, 15)
+    assert statement_for(date(2026, 12, 20), 15) == date(2027, 1, 15)
+    assert statement_for(date(2027, 2, 10), 31) == date(2027, 2, 28)  # month-end statement day clamps
+    assert due_for(date(2026, 11, 15), 15, 5) == date(2026, 12, 5)  # due next month
+    assert due_for(date(2026, 11, 15), 15, 28) == date(2026, 11, 28)  # due later the same month
+
+
+def add_card(c, name="HDFC", statement_day=15, due_day=5):
+    r = c.post("/api/cards", params=T, json={"name": name, "statement_day": statement_day, "due_day": due_day})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def charge(c, card, name, amount, due, category="Shopping", recurring="none"):
+    r = c.post("/api/expenses", params=T, json={
+        "name": name, "amount": amount, "due_date": due, "category": category, "recurring": recurring,
+        "payment_mode": "credit_card", "card_id": card["id"]})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_card_purchases_become_a_bill_instead_of_bills_each(client):
+    card = add_card(client)
+    charge(client, card, "Groceries", 1200, "2026-10-10", category="Food")   # statement 15 Oct, due 5 Nov
+    charge(client, card, "Shoes", 3000, "2026-10-14")                        # same statement
+    charge(client, card, "Dinner", 800, "2026-10-25", category="Food")       # statement 15 Nov (current)
+    up = client.get("/api/upcoming", params={"days": 30, **T}).json()
+    assert [(u["kind"], u["name"], u["amount"], u["due_date"], u["projected"]) for u in up] == [
+        ("card_bill", "HDFC bill", 4200, "2026-11-05", False)]
+    # purchases are spending in their own categories, already charged
+    nov = client.get("/api/expenses", params={"month": "2026-10", **T}).json()
+    assert all(e["paid"] for e in nov) and {e["category"] for e in nov} == {"Food", "Shopping"}
+    oct_v = {r["category"]: r["actual"] for r in client.get("/api/variance", params={"month": "2026-10", **T}).json()["rows"]}
+    assert oct_v == {"Food": 2000, "Shopping": 3000}
+    s = client.get("/api/summary", params=T).json()
+    assert (s["due_soon_count"], s["due_soon_amount"]) == (0, 0)  # 4 days away: outside the 3-day window
+    s = client.get("/api/summary", params={"today": "2026-11-03"}).json()
+    assert (s["due_soon_count"], s["due_soon_amount"]) == (1, 4200)
+
+    cards = client.get("/api/cards", params=T).json()
+    c = cards[0]
+    assert c["due_now"] == 4200 and c["charged_this_cycle"] == 800
+    assert c["current_statement"]["statement_date"] == "2026-11-15"
+    assert c["current_statement"]["due_date"] == "2026-12-05"
+    assert c["total_owed"] == 5000
+
+    # paying the statement clears it; undo brings it back
+    paid = client.post(f"/api/cards/{card['id']}/pay", params=T, json={"statement_date": "2026-10-15"}).json()
+    assert paid["due_now"] == 0 and paid["total_owed"] == 800
+    assert client.get("/api/upcoming", params={"days": 30, **T}).json() == []
+    assert client.post(f"/api/cards/{card['id']}/pay", params=T,
+                       json={"statement_date": "2026-10-15"}).status_code == 409
+    client.post(f"/api/cards/{card['id']}/unpay", params=T, json={"statement_date": "2026-10-15"})
+    assert client.get("/api/cards", params=T).json()[0]["due_now"] == 4200
+
+
+def test_partial_card_payment_and_overdue(client):
+    card = add_card(client)
+    charge(client, card, "Laptop bag", 2000, "2026-09-20")  # statement 15 Oct, due 5 Nov
+    client.post(f"/api/cards/{card['id']}/pay", params=T, json={"statement_date": "2026-10-15", "amount": 500})
+    late = {"today": "2026-11-07"}
+    up = client.get("/api/upcoming", params={"days": 7, **late}).json()
+    bill = next(u for u in up if u["kind"] == "card_bill" and not u["projected"])
+    assert (bill["amount"], bill["urgency"]) == (1500, "overdue")
+    s = client.get("/api/summary", params=late).json()
+    assert (s["overdue_count"], s["overdue_amount"]) == (1, 1500)
+    over = client.post(f"/api/cards/{card['id']}/pay", params=late, json={"statement_date": "2026-10-15", "amount": 1501})
+    assert over.status_code == 422
+
+
+def test_recurring_card_charges_roll_onto_each_statement(client):
+    card = add_card(client)
+    charge(client, card, "Netflix", 649, "2026-09-12", category="Subscriptions", recurring="monthly")
+    rows = client.get("/api/expenses", params=T).json()
+    assert [(e["due_date"], e["paid"]) for e in rows] == [
+        ("2026-09-12", True), ("2026-10-12", True), ("2026-11-12", False)]  # charged as each date passed
+    c = client.get("/api/cards", params=T).json()[0]
+    assert [s["statement_date"] for s in c["unpaid_statements"]] == ["2026-09-15", "2026-10-15"]
+    assert c["current_statement"]["total"] == 649  # 12 Nov, still to be charged
+    assert c["charged_this_cycle"] == 0
+    # next month's projected charge carries the card too
+    dec = client.get("/api/expenses", params={"month": "2026-12", **T}).json()
+    assert [(e["projected"], e["card_id"]) for e in dec] == [(True, card["id"])]
+
+
+def test_emis_add_instalments_to_statements_and_spending(client):
+    card = add_card(client)
+    r = client.post(f"/api/cards/{card['id']}/emis", params=T, json={
+        "name": "iPhone", "category": "Electronics", "monthly_amount": 2000, "first_date": "2026-10-20", "months": 3})
+    assert r.status_code == 201, r.text
+    emi = r.json()
+    assert (emi["last_date"], emi["months_done"], emi["months_left"], emi["remaining"]) == ("2026-12-20", 1, 2, 4000)
+
+    nov = client.get("/api/expenses", params={"month": "2026-11", **T}).json()
+    assert [(e["kind"], e["name"], e["amount"], e["paid"]) for e in nov] == [("emi", "iPhone EMI 2/3", 2000, False)]
+    s = client.get("/api/summary", params={"month": "2026-11", **T}).json()
+    assert s["scheduled_total"] == 2000 and s["unpaid_total"] == 2000
+    v = client.get("/api/variance", params={"month": "2026-10", **T}).json()
+    assert v["rows"][0]["category"] == "Electronics" and v["rows"][0]["actual"] == 2000
+    assert "Electronics" in client.get("/api/categories").json()
+
+    c = client.get("/api/cards", params=T).json()[0]
+    # 20 Oct instalment is on the 15 Nov statement (current cycle, already charged)
+    assert c["charged_this_cycle"] == 2000 and c["emi_remaining"] == 4000 and c["total_owed"] == 6000
+    assert c["emis"][0]["name"] == "iPhone"
+    # EMIs are not separate bills to pay
+    assert all(u["kind"] != "emi" for u in client.get("/api/upcoming", params={"days": 90, **T}).json())
+
+    client.put(f"/api/emis/{emi['id']}", params=T, json={
+        "name": "iPhone", "category": "Electronics", "monthly_amount": 2000, "first_date": "2026-10-20", "months": 6})
+    assert client.get("/api/cards", params=T).json()[0]["emi_remaining"] == 10000
+    assert client.delete(f"/api/emis/{emi['id']}").status_code == 204
+    assert client.get("/api/cards", params=T).json()[0]["total_owed"] == 0
+
+
+def test_payment_mode_validation(client):
+    card = add_card(client)
+    base = {"name": "x", "amount": 10, "due_date": "2026-11-05", "category": "Food"}
+    assert client.post("/api/expenses", params=T, json={**base, "payment_mode": "credit_card"}).status_code == 422
+    assert client.post("/api/expenses", params=T, json={**base, "payment_mode": "barter"}).status_code == 422
+    upi = client.post("/api/expenses", params=T, json={**base, "payment_mode": "upi", "card_id": card["id"]}).json()
+    assert (upi["payment_mode"], upi["card_id"]) == ("upi", None)  # card only kept for credit cards
+    # a plain UPI bill is still a bill to pay
+    assert [u["name"] for u in client.get("/api/upcoming", params=T).json()] == ["x"]
+
+
+def test_cards_are_private_and_deleting_keeps_purchases(app_):
+    with TestClient(app_) as a, TestClient(app_) as b:
+        signup(a, "a@example.com")
+        signup(b, "b@example.com")
+        card = add_card(a)
+        charge(a, card, "Shoes", 3000, "2026-10-14")
+        assert b.get("/api/cards", params=T).json() == []
+        assert b.post(f"/api/cards/{card['id']}/pay", params=T, json={"statement_date": "2026-10-15"}).status_code == 404
+        assert b.post(f"/api/cards/{card['id']}/emis", params=T, json={
+            "name": "x", "monthly_amount": 1, "first_date": "2026-11-01", "months": 1}).status_code == 404
+        steal = b.post("/api/expenses", params=T, json={"name": "x", "amount": 1, "due_date": "2026-11-01",
+                                                        "category": "x", "payment_mode": "credit_card",
+                                                        "card_id": card["id"]})
+        assert steal.status_code == 422
+        assert a.delete(f"/api/cards/{card['id']}").status_code == 204
+        kept = a.get("/api/expenses", params=T).json()
+        assert [(e["name"], e["card_id"]) for e in kept] == [("Shoes", None)]
+
+
+def test_debit_cards_are_named_but_have_no_bill(client):
+    debit = client.post("/api/cards", params=T, json={"name": "SBI", "kind": "debit"}).json()
+    assert (debit["kind"], debit["statement_day"], debit["total_owed"]) == ("debit", None, 0)
+    credit = add_card(client)
+    assert client.post("/api/cards", params=T, json={"name": "X", "kind": "credit"}).status_code == 422  # needs days
+
+    paid = client.post("/api/expenses", params=T, json={
+        "name": "Fuel", "amount": 2000, "due_date": "2026-11-01", "category": "Transport",
+        "payment_mode": "debit_card", "card_id": debit["id"]}).json()
+    assert (paid["payment_mode"], paid["card_id"]) == ("debit_card", debit["id"])
+    # debit purchases are ordinary bills (nothing auto-charged, no card bill)
+    assert [u["name"] for u in client.get("/api/upcoming", params=T).json()] == ["Fuel"]
+    # a debit card without saying which is fine too
+    anon = client.post("/api/expenses", params=T, json={"name": "Taxi", "amount": 300, "due_date": "2026-11-01",
+                                                        "category": "Transport", "payment_mode": "debit_card"})
+    assert anon.status_code == 201 and anon.json()["card_id"] is None
+
+    # cards must match the payment mode
+    wrong = {"name": "x", "amount": 1, "due_date": "2026-11-01", "category": "x"}
+    assert client.post("/api/expenses", params=T, json={**wrong, "payment_mode": "credit_card",
+                                                         "card_id": debit["id"]}).status_code == 422
+    assert client.post("/api/expenses", params=T, json={**wrong, "payment_mode": "debit_card",
+                                                         "card_id": credit["id"]}).status_code == 422
+    # no bills or EMIs on a debit card, and the type cannot be switched
+    assert client.post(f"/api/cards/{debit['id']}/pay", params=T, json={"statement_date": "2026-11-15"}).status_code == 409
+    assert client.post(f"/api/cards/{debit['id']}/emis", params=T, json={
+        "name": "x", "monthly_amount": 1, "first_date": "2026-11-01", "months": 1}).status_code == 409
+    assert client.put(f"/api/cards/{debit['id']}", params=T, json={"name": "SBI", "kind": "credit",
+                                                                   "statement_day": 1, "due_day": 5}).status_code == 422
+    renamed = client.put(f"/api/cards/{debit['id']}", params=T, json={"name": "SBI Savings", "kind": "debit"}).json()
+    assert renamed["name"] == "SBI Savings"
+    kinds = [(c["name"], c["kind"]) for c in client.get("/api/cards", params=T).json()]
+    assert kinds == [("HDFC", "credit"), ("SBI Savings", "debit")]

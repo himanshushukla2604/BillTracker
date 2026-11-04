@@ -43,9 +43,18 @@ export const URGENCY = {
 };
 
 /** React key: projected occurrences have no id until the bill before them is paid. */
-export const itemKey = (item) => item.id ?? `p${item.projected_from}-${item.due_date}`;
+export const itemKey = (item) =>
+  item.id ?? `${item.kind ?? 'expense'}-${item.projected_from ?? item.emi_id ?? item.card_id}-${item.due_date}`;
+
+/** Rows worked out by the server (projections, EMI instalments, card bill estimates) can't be edited. */
+export const isReadOnly = (item) => Boolean(item.projected) || item.kind === 'emi';
+
+/** "−₹4,000 paid back · Rahul" for bills someone partly paid back, else null. */
+export const paidBackText = (item, money) =>
+  item.reimbursed > 0 ? `−${money(item.reimbursed)} paid back${item.reimbursed_note ? ` · ${item.reimbursed_note}` : ''}` : null;
 
 export const PROJECTED_HINT = 'Projected: added automatically once the current one is marked paid';
+export const CARD_ESTIMATE_HINT = 'Estimate: this statement is still building up';
 
 export function dueText(item) {
   if (item.paid) return 'Paid';

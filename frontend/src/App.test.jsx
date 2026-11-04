@@ -20,7 +20,7 @@ function fakeFetch(url, init = {}) {
   const body = init.body ? JSON.parse(init.body) : undefined;
   calls.push({ method, path: u.pathname, body });
   const ok = (data, status = 200) =>
-    Promise.resolve({ ok: true, status, statusText: 'OK', json: async () => data });
+    Promise.resolve({ ok: true, status, statusText: 'OK', json: async () => structuredClone(data) });
 
   const fail = (status, detail) =>
     Promise.resolve({ ok: false, status, statusText: 'Error', json: async () => ({ detail }) });
@@ -39,8 +39,43 @@ function fakeFetch(url, init = {}) {
     const month = u.searchParams.get('month');
     return ok([...store.expenses, ...store.projected].filter((e) => e.due_date.startsWith(month)).map(decorate));
   }
-  if (p === '/api/upcoming') return ok([...store.expenses.filter((e) => !e.paid), ...store.projected].map(decorate));
+  if (p === '/api/upcoming') {
+    return ok([...store.expenses.filter((e) => !e.paid && e.payment_mode !== 'credit_card'), ...store.projected, ...store.cardBills]
+      .map(decorate));
+  }
   if (p === '/api/budgets') return ok(store.budgets);
+  if (p === '/api/loans' && method === 'GET') return ok(store.loans);
+  if (p === '/api/loans' && method === 'POST') {
+    const l = { id: 50 + store.loans.length, repaid: 0, outstanding: body.amount, status: 'open', repayments: [],
+      reminder_due: false, next_remind_on: body.first_reminder_on, days_to_due: null, overdue: false, ...body };
+    store.loans.push(l);
+    return ok(l, 201);
+  }
+  const repayM = p.match(/^\/api\/loans\/(\d+)\/repayments$/);
+  if (repayM) {
+    const l = store.loans.find((x) => x.id === Number(repayM[1]));
+    l.repayments = [...l.repayments, { id: 900 + l.repayments.length, amount: body.amount, paid_on: body.paid_on }];
+    l.repaid += body.amount;
+    l.outstanding -= body.amount;
+    if (l.outstanding <= 0) { l.status = 'repaid'; l.reminder_due = false; }
+    return ok(l, 201);
+  }
+  const remindM = p.match(/^\/api\/loans\/(\d+)\/reminded$/);
+  if (remindM) {
+    const l = store.loans.find((x) => x.id === Number(remindM[1]));
+    l.reminder_due = false;
+    l.next_remind_on = '2026-11-17';
+    return ok(l);
+  }
+  if (p === '/api/cards' && method === 'GET') return ok(store.cards);
+  const payCardM = p.match(/^\/api\/cards\/(\d+)\/pay$/);
+  if (payCardM) {
+    const c = store.cards.find((x) => x.id === Number(payCardM[1]));
+    c.unpaid_statements = c.unpaid_statements.filter((st) => st.statement_date !== body.statement_date);
+    c.due_now = 0;
+    store.cardBills = store.cardBills.filter((b) => b.statement_date !== body.statement_date);
+    return ok(c);
+  }
   if (p === '/api/settings' && method === 'GET') return ok({ total_budget: store.total });
   if (p === '/api/settings' && method === 'PUT') { store.total = body.total_budget; return ok({ total_budget: store.total }); }
   if (p === '/api/categories') return ok([...new Set(store.expenses.map((e) => e.category))].sort());
@@ -79,6 +114,9 @@ beforeEach(() => {
       { id: 5, name: 'Groceries', amount: 1240, due_date: '2026-11-03', category: 'Food', paid: true, paid_on: '2026-11-03' },
     ],
     projected: [],
+    loans: [],
+    cards: [],
+    cardBills: [],
   };
   globalThis.fetch = vi.fn(async (url, init) => fakeFetch(url, init));
 });
@@ -198,6 +236,7 @@ it('validates and submits the add-expense form', async () => {
   const post = calls.find((c) => c.method === 'POST' && c.path === '/api/expenses');
   expect(post.body).toEqual({
     name: 'EatClub', amount: 149, due_date: '2026-11-10', category: 'Subscriptions', recurring: 'monthly',
+    payment_mode: null, card_id: null,
   });
   // 50,000 - 39,739 - 149
   await waitFor(() => expect(screen.getByTestId('remaining')).toHaveTextContent('₹10,112'));
@@ -259,6 +298,42 @@ it('an expired session sends you back to log in', async () => {
   expect(await screen.findByLabelText('Password')).toBeInTheDocument();
 });
 
+it('money paid back is shown on the bill and not counted against the budget', async () => {
+  store.expenses[3] = { ...store.expenses[3], reimbursed: 4000, reimbursed_note: 'Rahul' }; // HDFC card 14,200
+  await renderApp();
+  // 50,000 - (39,739 - 4,000)
+  expect(screen.getByTestId('remaining')).toHaveTextContent('₹14,261');
+  expect(screen.getByTestId('paid-back')).toHaveTextContent('−₹4,000');
+  expect(screen.getByTestId('paid-back-tag')).toHaveTextContent('−₹4,000 paid back · Rahul');
+  // the timeline still shows the full card bill as due
+  const row = [...timeline().querySelectorAll('li[data-urgency]')].find((li) => li.textContent.includes('HDFC'));
+  expect(row).toHaveTextContent('₹14,200');
+});
+
+it('records a paid-back amount from the form and checks it fits the bill', async () => {
+  const user = userEvent.setup();
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  await user.type(within(dialog).getByLabelText('Expense name'), 'ICICI Card');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '5000');
+  await user.type(within(dialog).getByLabelText('Category'), 'Credit Cards');
+  await user.click(within(dialog).getByRole('button', { name: '+ Someone paid me back part of this' }));
+  await user.type(within(dialog).getByLabelText('Amount paid back (₹)'), '6000');
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  expect(within(dialog).getByText('Cannot be more than the amount')).toBeInTheDocument();
+
+  await user.clear(within(dialog).getByLabelText('Amount paid back (₹)'));
+  await user.type(within(dialog).getByLabelText('Amount paid back (₹)'), '1500');
+  await user.type(within(dialog).getByLabelText('From / for (optional)'), 'Asha - dinner');
+  expect(within(dialog).getByText(/Counts as ₹3,500 of your own spending/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/expenses').body).toMatchObject({
+    name: 'ICICI Card', amount: 5000, reimbursed: 1500, reimbursed_note: 'Asha - dinner',
+  });
+});
+
 it('a brand-new account still gets category suggestions it can click', async () => {
   const user = userEvent.setup();
   store.expenses = [];
@@ -271,6 +346,150 @@ it('a brand-new account still gets category suggestions it can click', async () 
   await user.click(within(chips).getByRole('button', { name: 'Utilities' }));
   expect(within(dialog).getByLabelText('Category')).toHaveValue('Utilities');
   expect(within(chips).getByRole('button', { name: 'Utilities' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+// ---- lending -------------------------------------------------------------------------
+const loan = (over) => ({
+  id: 7, person: 'Rahul', amount: 5000, lent_on: '2026-10-20', due_date: '2026-11-05', note: null, repaid: 2000,
+  outstanding: 3000, status: 'open', days_to_due: -5, overdue: true, remind_every_days: 7,
+  next_remind_on: '2026-11-10', reminder_due: true, repayments: [{ id: 1, amount: 2000, paid_on: '2026-10-28' }], ...over,
+});
+const loansPanel = () => screen.getByRole('region', { name: 'Money lent' });
+
+it('reminds you to ask for money back until you say you asked', async () => {
+  const user = userEvent.setup();
+  store.loans = [loan()];
+  await renderApp();
+  expect(screen.getByTestId('loan-reminders')).toHaveTextContent('Ask Rahul for ₹3,000 back');
+  expect(document.title).toBe('(4) Bill Tracker');
+  expect(loansPanel()).toHaveTextContent('₹3,000 owed to you by 1 person');
+  expect(loansPanel()).toHaveTextContent('₹3,000 left of ₹5,000');
+  expect(loansPanel()).toHaveTextContent('5d past due');
+  await user.click(within(loansPanel()).getByRole('button', { name: "I've asked" }));
+  await waitFor(() => expect(screen.queryByTestId('loan-reminders')).not.toBeInTheDocument());
+  expect(calls.some((c) => c.method === 'POST' && c.path === '/api/loans/7/reminded')).toBe(true);
+  expect(loansPanel()).toHaveTextContent('Next reminder 17 Nov · every week');
+});
+
+it('lends money with a reminder schedule', async () => {
+  const user = userEvent.setup();
+  await renderApp();
+  await user.click(within(loansPanel()).getByRole('button', { name: 'Lend' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Lend money' });
+  await user.click(within(dialog).getByRole('button', { name: 'Save loan' }));
+  expect(within(dialog).getByText('Who did you lend it to?')).toBeInTheDocument();
+  await user.type(within(dialog).getByLabelText('Lent to'), 'Asha');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '2,500');
+  await user.type(within(dialog).getByLabelText('Get it back by (optional)'), '2026-11-30');
+  await user.selectOptions(within(dialog).getByLabelText('Remind me to ask'), '3');
+  expect(within(dialog).getByText(/Starts the day it's due back \(30 Nov\), then every 3 days/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole('button', { name: 'Save loan' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/loans').body).toEqual({
+    person: 'Asha', amount: 2500, lent_on: '2026-11-10', due_date: '2026-11-30', note: null,
+    remind_every_days: 3, first_reminder_on: null,
+  });
+  expect(loansPanel()).toHaveTextContent('Asha');
+});
+
+it('records money paid back and closes the loan', async () => {
+  const user = userEvent.setup();
+  store.loans = [loan({ reminder_due: false })];
+  await renderApp();
+  await user.click(within(loansPanel()).getByRole('button', { name: 'Got money back' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Money back from Rahul' });
+  expect(within(dialog).getByLabelText('Amount received (₹)')).toHaveValue('3000');
+  await user.click(within(dialog).getByRole('button', { name: 'Record repayment' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.path === '/api/loans/7/repayments').body).toEqual({ amount: 3000, paid_on: '2026-11-10' });
+  expect(await screen.findByText('Rahul has paid you back in full')).toBeInTheDocument();
+  expect(loansPanel()).toHaveTextContent('Nobody owes you money');
+});
+
+// ---- credit cards ------------------------------------------------------------------------
+const hdfc = () => ({
+  id: 1, name: 'HDFC', kind: 'credit', statement_day: 15, due_day: 5, due_now: 4200, charged_this_cycle: 800, emi_remaining: 4000,
+  total_owed: 9000,
+  unpaid_statements: [{ statement_date: '2026-10-15', due_date: '2026-11-05', total: 4200, paid: 0, balance: 4200, overdue: true }],
+  current_statement: { statement_date: '2026-11-15', due_date: '2026-12-05', total: 2800, paid: 0, balance: 2800, overdue: false },
+  emis: [{ id: 3, card_id: 1, name: 'iPhone', category: 'Electronics', monthly_amount: 2000, first_date: '2026-10-20',
+    last_date: '2026-12-20', months: 3, months_done: 1, months_left: 2, remaining: 4000 }],
+});
+const cardsPanel = () => screen.getByRole('region', { name: 'Cards' });
+
+it('shows what you owe each card and pays the bill from the timeline', async () => {
+  const user = userEvent.setup();
+  store.cards = [hdfc()];
+  store.cardBills = [{ id: null, kind: 'card_bill', name: 'HDFC bill', amount: 4200, due_date: '2026-11-05',
+    category: 'Credit card bill', paid: false, projected: false, card_id: 1, statement_date: '2026-10-15' }];
+  await renderApp();
+  expect(within(cardsPanel()).getByTestId('card-total')).toHaveTextContent('₹9,000');
+  expect(cardsPanel()).toHaveTextContent('EMIs still to come₹4,000');
+  expect(cardsPanel()).toHaveTextContent('1 of 3 paid · ends Dec 2026');
+  const row = [...timeline().querySelectorAll('li[data-urgency]')].find((li) => li.textContent.includes('HDFC bill'));
+  expect(row).toHaveTextContent('Statement 15 Oct');
+  expect(within(row).queryByRole('button', { name: 'Edit HDFC bill' })).toBeNull();
+  await user.click(within(row).getByRole('button', { name: 'Mark HDFC bill as paid' }));
+  await waitFor(() => expect(rowsOf(timeline()).map((r) => r[0])).not.toContain('HDFC bill'));
+  expect(calls.find((c) => c.path === '/api/cards/1/pay').body).toEqual({ statement_date: '2026-10-15' });
+});
+
+it('a purchase can be paid by credit card', async () => {
+  const user = userEvent.setup();
+  store.cards = [hdfc()];
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  await user.type(within(dialog).getByLabelText('Expense name'), 'Shoes');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '3000');
+  await user.type(within(dialog).getByLabelText('Category'), 'Shopping');
+  await user.selectOptions(within(dialog).getByLabelText('Paid with'), 'credit_card');
+  expect(within(dialog).getByLabelText('Card')).toHaveValue('1');
+  expect(within(dialog).getByText(/goes on that card's bill/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole('radio', { name: 'One-time' }));
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/expenses').body).toMatchObject({
+    name: 'Shoes', amount: 3000, payment_mode: 'credit_card', card_id: 1, recurring: 'none',
+  });
+});
+
+it('debit cards are listed and can be picked as the card a payment came from', async () => {
+  const user = userEvent.setup();
+  const sbi = { id: 2, name: 'SBI Savings', kind: 'debit', statement_day: null, due_day: null, due_now: 0,
+    unpaid_statements: [], current_statement: null, charged_this_cycle: 0, emi_remaining: 0, total_owed: 0, emis: [] };
+  store.cards = [hdfc(), sbi];
+  await renderApp();
+  expect(within(cardsPanel()).getByText('Debit cards')).toBeInTheDocument();
+  expect(cardsPanel().querySelector('[data-card="SBI Savings"]')).not.toBeNull();
+  await user.click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  await user.type(within(dialog).getByLabelText('Expense name'), 'Fuel');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '2000');
+  await user.type(within(dialog).getByLabelText('Category'), 'Transport');
+  await user.selectOptions(within(dialog).getByLabelText('Paid with'), 'debit_card');
+  const card = within(dialog).getByLabelText('Card');
+  expect([...card.options].map((o) => o.textContent)).toEqual(['Not saying', 'SBI Savings']); // only debit cards
+  await user.selectOptions(card, '2');
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/expenses').body)
+    .toMatchObject({ payment_mode: 'debit_card', card_id: 2 });
+});
+
+it('EMI instalments appear as read-only spending rows', async () => {
+  store.cards = [hdfc()];
+  store.expenses.push({ id: null, kind: 'emi', emi_id: 3, name: 'iPhone EMI 2/3', amount: 2000, due_date: '2026-11-20',
+    category: 'Electronics', paid: false, recurring: 'monthly', payment_mode: 'credit_card', card_id: 1 });
+  await renderApp();
+  const ledger = screen.getByRole('region', { name: 'All expenses' });
+  const row = ledger.querySelector('li[data-kind="emi"]');
+  expect(row).toHaveTextContent('iPhone EMI 2/3');
+  expect(row).toHaveTextContent('EMI');
+  expect(row).toHaveTextContent('HDFC card');
+  expect(within(row).queryByRole('button')).toBeNull();
+  // counts as spending: 50,000 - (39,739 + 2,000)
+  expect(screen.getByTestId('remaining')).toHaveTextContent('₹8,261');
 });
 
 it('shows a helpful message when the API is down', async () => {

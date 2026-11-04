@@ -1,6 +1,6 @@
 import { Check, Pencil, Plus, Repeat } from 'lucide-react';
 import { dayLabel, money, shortDate } from '../lib/format';
-import { PROJECTED_HINT, URGENCY, dueText, itemKey } from '../lib/urgency';
+import { CARD_ESTIMATE_HINT, PROJECTED_HINT, URGENCY, dueText, itemKey, paidBackText } from '../lib/urgency';
 
 const RANGES = [7, 30, 90];
 
@@ -103,7 +103,13 @@ export default function UpcomingTimeline({ items, days, onDaysChange, todayISO, 
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                           <span>{i.category}</span>
                           <span className={`rounded-full px-2 py-0.5 font-medium ${u.chip}`}>{dueText(i)}</span>
-                          {i.projected && <span title={PROJECTED_HINT}>Projected</span>}
+                          {i.projected && (i.kind === 'card_bill'
+                            ? <span title={CARD_ESTIMATE_HINT}>Estimate · statement {shortDate(i.statement_date)}</span>
+                            : <span title={PROJECTED_HINT}>Projected</span>)}
+                          {i.kind === 'card_bill' && !i.projected && <span>Statement {shortDate(i.statement_date)}</span>}
+                          {paidBackText(i, money) && (
+                            <span className="num text-sky-700 dark:text-sky-400">{paidBackText(i, money)}</span>
+                          )}
                         </div>
                       </div>
                       <span className="num shrink-0 font-semibold">{money(i.amount)}</span>
@@ -116,9 +122,11 @@ export default function UpcomingTimeline({ items, days, onDaysChange, todayISO, 
                           >
                             <Check className="h-4 w-4" /> <span className="hidden sm:inline">Paid</span>
                           </button>
-                          <button className="btn-ghost shrink-0 p-1.5" onClick={() => onEdit(i)} aria-label={`Edit ${i.name}`}>
-                            <Pencil className="h-4 w-4" />
-                          </button>
+                          {i.kind !== 'card_bill' && (
+                            <button className="btn-ghost shrink-0 p-1.5" onClick={() => onEdit(i)} aria-label={`Edit ${i.name}`}>
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                          )}
                         </>
                       )}
                     </li>

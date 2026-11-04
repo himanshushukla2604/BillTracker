@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Check, Pencil, Repeat, Trash2, Undo2 } from 'lucide-react';
 import { money, shortDate } from '../lib/format';
-import { PROJECTED_HINT, URGENCY, dueText, itemKey } from '../lib/urgency';
+import { paidWith } from '../lib/payment';
+import { PROJECTED_HINT, URGENCY, dueText, isReadOnly, itemKey, paidBackText } from '../lib/urgency';
 
 const TABS = [
   ['all', 'All'],
@@ -9,7 +10,7 @@ const TABS = [
   ['paid', 'Paid'],
 ];
 
-export default function ExpenseList({ expenses, monthLabel, onPay, onUnpay, onEdit, onDelete, className = '' }) {
+export default function ExpenseList({ expenses, cards = [], monthLabel, onPay, onUnpay, onEdit, onDelete, className = '' }) {
   const [tab, setTab] = useState('all');
   const [confirmId, setConfirmId] = useState(null);
 
@@ -21,6 +22,7 @@ export default function ExpenseList({ expenses, monthLabel, onPay, onUnpay, onEd
 
   const rows = expenses.filter((e) => tab === 'all' || (tab === 'paid') === e.paid);
   const total = rows.reduce((s, e) => s + e.amount, 0);
+  const back = rows.reduce((s, e) => s + (e.reimbursed || 0), 0);
 
   return (
     <section className={`card p-5 ${className}`} aria-labelledby="ledger-h">
@@ -57,7 +59,8 @@ export default function ExpenseList({ expenses, monthLabel, onPay, onUnpay, onEd
             {rows.map((e) => {
               const u = URGENCY[e.urgency];
               return (
-                <li key={itemKey(e)} data-projected={e.projected || undefined} className={`flex items-center gap-3 py-2.5 ${e.projected ? 'opacity-75' : ''}`}>
+                <li key={itemKey(e)} data-projected={e.projected || undefined} data-kind={e.kind ?? 'expense'}
+                  className={`flex items-center gap-3 py-2.5 ${isReadOnly(e) ? 'opacity-75' : ''}`}>
                   <div className="w-12 shrink-0 text-center">
                     <span className="num block text-sm font-semibold">{shortDate(e.due_date).split(' ')[0]}</span>
                     <span className="block text-[10px] uppercase text-stone-500 dark:text-stone-400">
@@ -79,10 +82,15 @@ export default function ExpenseList({ expenses, monthLabel, onPay, onUnpay, onEd
                         {e.paid && e.paid_on ? `Paid ${shortDate(e.paid_on)}` : dueText(e)}
                       </span>
                       {e.projected && <span title={PROJECTED_HINT}>Projected</span>}
+                      {e.kind === 'emi' && <span className="rounded-full bg-violet-100 px-2 py-0.5 font-medium text-violet-800 dark:bg-violet-900/50 dark:text-violet-200">EMI</span>}
+                      {paidWith(e, cards) && <span data-testid="paid-with">{paidWith(e, cards)}</span>}
+                      {paidBackText(e, money) && (
+                        <span className="num text-sky-700 dark:text-sky-400" data-testid="paid-back-tag">{paidBackText(e, money)}</span>
+                      )}
                     </div>
                   </div>
                   <span className="num shrink-0 font-semibold">{money(e.amount)}</span>
-                  {!e.projected && <div className="flex shrink-0 items-center">
+                  {!isReadOnly(e) && <div className="flex shrink-0 items-center">
                     {e.paid ? (
                       <button className="btn-ghost p-1.5" onClick={() => onUnpay(e)} aria-label={`Undo payment for ${e.name}`} title="Mark as unpaid">
                         <Undo2 className="h-4 w-4" />
@@ -119,6 +127,7 @@ export default function ExpenseList({ expenses, monthLabel, onPay, onUnpay, onEd
           </ul>
           <p className="num mt-3 border-t border-stone-200 pt-3 text-right text-sm text-stone-600 dark:border-neutral-800 dark:text-stone-300">
             {rows.length} item{rows.length === 1 ? '' : 's'} · <strong>{money(total)}</strong>
+            {back > 0 && <> · your share <strong>{money(total - back)}</strong></>}
           </p>
         </>
       )}

@@ -11,16 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, backup, db
+from . import auth, backup, cards, db, loans
+from .ledger import (
+    ALERT_WINDOW_DAYS, chronological as _chronological, month_bounds as _month_bounds, projections as _projections,
+    r as _r, to_out as _to_out, today_or as _today,
+)
 from .recurrence import next_due
 from .schemas import (
     BudgetIn, BudgetOut, ExpenseIn, ExpenseOut, SettingsIn, SettingsOut,
     Summary, Variance, VarianceRow,
 )
 
-ALERT_WINDOW_DAYS = 3  # bills due within this many days are colour-coded
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
-MAX_PROJECTED = 600  # safety cap on occurrences rolled forward per bill
 
 
 @asynccontextmanager
@@ -39,6 +41,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(loans.router)
+app.include_router(cards.router)
 
 Conn = Depends(db.get_conn)
 Me = Depends(auth.current_user)  # every data route is scoped to the logged-in user
@@ -54,86 +58,6 @@ async def daily_backup(request: Request, call_next):
 
 # ---------------------------------------------------------------- helpers
 
-def _today(today: Optional[date]) -> date:
-    """Clients pass their local date so 'due today' is right across time zones."""
-    return today or date.today()
-
-
-def _month_bounds(month: Optional[str], today: date) -> tuple[str, date, date]:
-    if month is None:
-        month = today.strftime("%Y-%m")
-    year, mon = int(month[:4]), int(month[5:7])
-    start = date(year, mon, 1)
-    end = date(year + (mon == 12), (mon % 12) + 1, 1)
-    return month, start, end
-
-
-def _urgency(paid: bool, days_left: int) -> str:
-    if paid:
-        return "paid"
-    if days_left < 0:
-        return "overdue"
-    if days_left <= 1:
-        return "urgent"  # today or tomorrow
-    if days_left <= ALERT_WINDOW_DAYS:
-        return "soon"  # 2-3 days out
-    return "later"
-
-
-def _to_out(row: sqlite3.Row, today: date) -> ExpenseOut:
-    due = date.fromisoformat(row["due_date"])
-    days_left = (due - today).days
-    paid = bool(row["paid"])
-    return ExpenseOut(
-        id=row["id"],
-        name=row["name"],
-        amount=row["amount"],
-        due_date=due,
-        category=row["category"],
-        recurring=row["recurring"],
-        paid=paid,
-        paid_on=date.fromisoformat(row["paid_on"]) if row["paid_on"] else None,
-        generated_from=row["generated_from"],
-        days_left=days_left,
-        urgency=_urgency(paid, days_left),
-    )
-
-
-def _projections(conn: sqlite3.Connection, uid: int, start: date, end: date, today: date,
-                 category: Optional[str] = None) -> list[ExpenseOut]:
-    """Future occurrences of recurring bills in [start, end) that are not stored yet.
-
-    The next row of a series is only created when the current one is paid, so every
-    unpaid recurring bill is the end of its series: roll it forward to fill the window.
-    Only dates from today on are projected; the past is whatever was recorded.
-    """
-    start = max(start, today)
-    sql, args = "SELECT * FROM expenses WHERE user_id=? AND paid=0 AND recurring != 'none'", [uid]
-    if category:
-        sql += " AND category = ? COLLATE NOCASE"
-        args.append(category)
-    out: list[ExpenseOut] = []
-    for row in conn.execute(sql, args):
-        d = date.fromisoformat(row["due_date"])
-        for _ in range(MAX_PROJECTED):
-            d = next_due(d, row["recurring"], row["anchor_day"])
-            if d is None or d >= end:
-                break
-            if d >= start:
-                days_left = (d - today).days
-                out.append(ExpenseOut(
-                    id=None, name=row["name"], amount=row["amount"], due_date=d,
-                    category=row["category"], recurring=row["recurring"], paid=False,
-                    days_left=days_left, urgency=_urgency(False, days_left),
-                    projected=True, projected_from=row["id"],
-                ))
-    return out
-
-
-def _chronological(items: list[ExpenseOut]) -> list[ExpenseOut]:
-    return sorted(items, key=lambda e: (e.due_date, e.projected, e.id or e.projected_from))
-
-
 def _get_row(conn: sqlite3.Connection, uid: int, expense_id: int) -> sqlite3.Row:
     """Someone else's expense is reported as missing, not forbidden, so ids reveal nothing."""
     row = conn.execute("SELECT * FROM expenses WHERE id=? AND user_id=?", (expense_id, uid)).fetchone()
@@ -142,13 +66,17 @@ def _get_row(conn: sqlite3.Connection, uid: int, expense_id: int) -> sqlite3.Row
     return row
 
 
+def _card_charge(e: ExpenseOut) -> bool:
+    """Charged to a credit card: settled through the card's bill, not paid on its own."""
+    return e.payment_mode == "credit_card" and e.card_id is not None
+
+
+CARD_CHARGE_SQL = "(payment_mode = 'credit_card' AND card_id IS NOT NULL)"
+
+
 def _total_budget(conn: sqlite3.Connection, uid: int) -> float:
     row = conn.execute("SELECT value FROM settings WHERE user_id=? AND key='total_budget'", (uid,)).fetchone()
     return float(row["value"]) if row else 0.0
-
-
-def _r(x: float) -> float:
-    return round(x + 0.0, 2)
 
 
 # --------------------------------------------------------------- expenses
@@ -163,8 +91,10 @@ def list_expenses(
     conn: sqlite3.Connection = Conn,
     uid: int = Me,
 ):
-    """Stored bills, plus projected recurring ones when a month is given (`projected=false` to skip)."""
+    """Stored bills, plus, when a month is given, projected recurring ones (`projected=false` to skip)
+    and EMI instalments dated in it."""
     t = _today(today)
+    cards.charge_due(conn, uid, t)
     sql, args = "SELECT * FROM expenses WHERE user_id=?", [uid]
     if month:
         _, start, end = _month_bounds(month, t)
@@ -180,6 +110,10 @@ def list_expenses(
     items = [_to_out(r, t) for r in conn.execute(sql, args)]
     if month and projected and status != "paid":
         items += _projections(conn, uid, start, end, t, category)
+    if month:
+        items += [e for e in cards.emi_items(conn, uid, start, end, t)
+                  if (not status or e.paid == (status == "paid"))
+                  and (not category or e.category.lower() == category.lower())]
     return _chronological(items)
 
 
@@ -192,8 +126,10 @@ def upcoming(
     uid: int = Me,
 ):
     """Unpaid bills in chronological order: everything overdue, then the next `days` days
-    (including projected occurrences of recurring bills)."""
+    (including projected occurrences of recurring bills). Purchases charged to a card are left
+    out; the card's bill stands for them."""
     t = _today(today)
+    cards.charge_due(conn, uid, t)
     horizon = t + timedelta(days=days)
     rows = conn.execute(
         "SELECT * FROM expenses WHERE user_id=? AND paid=0 AND due_date <= ? ORDER BY due_date, id",
@@ -202,17 +138,21 @@ def upcoming(
     items = [_to_out(r, t) for r in rows]
     if projected:
         items += _projections(conn, uid, t, horizon + timedelta(days=1), t)
+    items = [e for e in items if not _card_charge(e)]
+    items += [b for b in cards.bills_to_pay(conn, uid, t, horizon) if projected or not b.projected]
     return _chronological(items)
 
 
 @app.post("/api/expenses", response_model=ExpenseOut, status_code=201)
 def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
                    uid: int = Me):
+    cards.owned_card(conn, uid, body.card_id, body.payment_mode)
     cur = conn.execute(
-        "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day)"
-        " VALUES (?,?,?,?,?,?,?)",
-        (uid, body.name, _r(body.amount), body.due_date.isoformat(), body.category,
-         body.recurring, body.due_date.day),
+        "INSERT INTO expenses (user_id, name, amount, reimbursed, reimbursed_note, due_date, category,"
+        " recurring, anchor_day, payment_mode, card_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (uid, body.name, _r(body.amount), _r(body.reimbursed), body.reimbursed_note,
+         body.due_date.isoformat(), body.category, body.recurring, body.due_date.day,
+         body.payment_mode, body.card_id),
     )
     conn.commit()
     return _to_out(_get_row(conn, uid, cur.lastrowid), _today(today))
@@ -222,10 +162,12 @@ def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.
 def update_expense(expense_id: int, body: ExpenseIn, today: Optional[date] = None,
                    conn: sqlite3.Connection = Conn, uid: int = Me):
     _get_row(conn, uid, expense_id)
+    cards.owned_card(conn, uid, body.card_id, body.payment_mode)
     conn.execute(
-        "UPDATE expenses SET name=?, amount=?, due_date=?, category=?, recurring=?, anchor_day=? WHERE id=?",
-        (body.name, _r(body.amount), body.due_date.isoformat(), body.category,
-         body.recurring, body.due_date.day, expense_id),
+        "UPDATE expenses SET name=?, amount=?, reimbursed=?, reimbursed_note=?, due_date=?, category=?,"
+        " recurring=?, anchor_day=?, payment_mode=?, card_id=? WHERE id=?",
+        (body.name, _r(body.amount), _r(body.reimbursed), body.reimbursed_note, body.due_date.isoformat(),
+         body.category, body.recurring, body.due_date.day, body.payment_mode, body.card_id, expense_id),
     )
     conn.commit()
     return _to_out(_get_row(conn, uid, expense_id), _today(today))
@@ -254,9 +196,9 @@ def mark_paid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Conne
         if nxt and not has_child:
             conn.execute(
                 "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day,"
-                " generated_from) VALUES (?,?,?,?,?,?,?,?)",
+                " generated_from, payment_mode, card_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (uid, row["name"], row["amount"], nxt.isoformat(), row["category"],
-                 row["recurring"], row["anchor_day"], expense_id),
+                 row["recurring"], row["anchor_day"], expense_id, row["payment_mode"], row["card_id"]),
             )
         conn.commit()
     return _to_out(_get_row(conn, uid, expense_id), t)
@@ -331,7 +273,7 @@ def delete_budget(category: str, conn: sqlite3.Connection = Conn, uid: int = Me)
 @app.get("/api/categories", response_model=list[str])
 def categories(conn: sqlite3.Connection = Conn, uid: int = Me):
     names: dict[str, str] = {}
-    for table in ("budgets", "expenses"):
+    for table in ("budgets", "expenses", "emis"):
         for r in conn.execute(f"SELECT DISTINCT category FROM {table} WHERE user_id=?", (uid,)):
             names.setdefault(r["category"].lower(), r["category"])
     return sorted(names.values(), key=str.lower)
@@ -346,40 +288,54 @@ def summary(
     conn: sqlite3.Connection = Conn,
     uid: int = Me,
 ):
-    """Remaining budget = total budget minus everything dated in the month (paid, not yet paid,
-    and projected recurring bills).
+    """Remaining budget = total budget minus your own spend: everything dated in the month (paid,
+    not yet paid, and projected recurring bills) less what other people paid back to you.
+    Bill totals and the overdue / due-soon amounts stay in full, since that is what you owe.
+    EMI instalments dated in the month count as spending; card bills do not (the purchases did).
 
     The overdue / due-soon figures are global (not limited to the month) because
-    they drive the alerts.
+    they drive the alerts. They count card bills instead of the purchases charged to cards.
     """
     t = _today(today)
+    cards.charge_due(conn, uid, t)
     month, start, end = _month_bounds(month, t)
-    paid_total = unpaid_total = 0.0
+    paid_total = unpaid_total = paid_back = unpaid_back = 0.0
     for r in conn.execute(
-        "SELECT paid, COALESCE(SUM(amount),0) AS s FROM expenses"
+        "SELECT paid, COALESCE(SUM(amount),0) AS s, COALESCE(SUM(reimbursed),0) AS back FROM expenses"
         " WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY paid",
         (uid, start.isoformat(), end.isoformat()),
     ):
         if r["paid"]:
-            paid_total = r["s"]
+            paid_total, paid_back = r["s"], r["back"]
         else:
-            unpaid_total = r["s"]
+            unpaid_total, unpaid_back = r["s"], r["back"]
     projected_total = sum(p.amount for p in _projections(conn, uid, start, end, t))
     unpaid_total += projected_total
+    for e in cards.emi_items(conn, uid, start, end, t):
+        if e.paid:
+            paid_total += e.amount
+        else:
+            unpaid_total += e.amount
     scheduled = paid_total + unpaid_total
+    reimbursed = paid_back + unpaid_back
+    own = scheduled - reimbursed
     budget = _total_budget(conn, uid)
 
     od = conn.execute(
-        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses WHERE user_id=? AND paid=0 AND due_date < ?",
+        "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses"
+        f" WHERE user_id=? AND paid=0 AND due_date < ? AND NOT {CARD_CHARGE_SQL}",
         (uid, t.isoformat()),
     ).fetchone()
     soon_end = t + timedelta(days=ALERT_WINDOW_DAYS)
     ds = conn.execute(
         "SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expenses"
-        " WHERE user_id=? AND paid=0 AND due_date BETWEEN ? AND ?",
+        f" WHERE user_id=? AND paid=0 AND due_date BETWEEN ? AND ? AND NOT {CARD_CHARGE_SQL}",
         (uid, t.isoformat(), soon_end.isoformat()),
     ).fetchone()
-    soon_projected = _projections(conn, uid, t, soon_end + timedelta(days=1), t)
+    soon_projected = [p for p in _projections(conn, uid, t, soon_end + timedelta(days=1), t) if not _card_charge(p)]
+    card_bills = cards.bills_to_pay(conn, uid, t, soon_end)
+    soon_projected += [b for b in card_bills if b.days_left >= 0]
+    card_overdue = [b for b in card_bills if b.days_left < 0]
 
     return Summary(
         month=month,
@@ -388,11 +344,13 @@ def summary(
         paid_total=_r(paid_total),
         unpaid_total=_r(unpaid_total),
         projected_total=_r(projected_total),
-        remaining=_r(budget - scheduled),
-        remaining_after_paid=_r(budget - paid_total),
-        percent_committed=_r(scheduled / budget * 100) if budget else 0.0,
-        overdue_count=od["c"],
-        overdue_amount=_r(od["s"]),
+        reimbursed_total=_r(reimbursed),
+        own_spend=_r(own),
+        remaining=_r(budget - own),
+        remaining_after_paid=_r(budget - (paid_total - paid_back)),
+        percent_committed=_r(own / budget * 100) if budget else 0.0,
+        overdue_count=od["c"] + len(card_overdue),
+        overdue_amount=_r(od["s"] + sum(b.amount for b in card_overdue)),
         due_soon_count=ds["c"] + len(soon_projected),
         due_soon_amount=_r(ds["s"] + sum(p.amount for p in soon_projected)),
     )
@@ -405,8 +363,11 @@ def variance(
     conn: sqlite3.Connection = Conn,
     uid: int = Me,
 ):
-    """Target vs actual per category. variance = target - actual: positive means under target."""
+    """Target vs actual per category. variance = target - actual: positive means under target.
+    Actual is your own share, so money someone paid back to you does not count as overspending.
+    EMI instalments count in their EMI's category."""
     t = _today(today)
+    cards.charge_due(conn, uid, t)
     month, start, end = _month_bounds(month, t)
 
     targets: dict[str, tuple[str, float]] = {}
@@ -415,23 +376,32 @@ def variance(
 
     actuals: dict[str, dict] = {}
     for r in conn.execute(
-        "SELECT category, SUM(amount) AS actual, SUM(CASE WHEN paid=1 THEN amount ELSE 0 END) AS paid"
+        "SELECT category, SUM(amount - reimbursed) AS actual, SUM(reimbursed) AS back,"
+        " SUM(CASE WHEN paid=1 THEN amount - reimbursed ELSE 0 END) AS paid"
         " FROM expenses WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY category",
         (uid, start.isoformat(), end.isoformat()),
     ):
         key = r["category"].lower()
-        slot = actuals.setdefault(key, {"name": r["category"], "actual": 0.0, "paid": 0.0})
+        slot = actuals.setdefault(key, {"name": r["category"], "actual": 0.0, "paid": 0.0, "back": 0.0})
         slot["actual"] += r["actual"]
         slot["paid"] += r["paid"]
+        slot["back"] += r["back"]
     for p in _projections(conn, uid, start, end, t):
-        slot = actuals.setdefault(p.category.lower(), {"name": p.category, "actual": 0.0, "paid": 0.0})
+        slot = actuals.setdefault(p.category.lower(),
+                                  {"name": p.category, "actual": 0.0, "paid": 0.0, "back": 0.0})
         slot["actual"] += p.amount
+    for e in cards.emi_items(conn, uid, start, end, t):
+        slot = actuals.setdefault(e.category.lower(),
+                                  {"name": e.category, "actual": 0.0, "paid": 0.0, "back": 0.0})
+        slot["actual"] += e.amount
+        if e.paid:
+            slot["paid"] += e.amount
 
     rows: list[VarianceRow] = []
     for key in sorted(set(targets) | set(actuals)):
         name = targets[key][0] if key in targets else actuals[key]["name"]
         target = targets[key][1] if key in targets else None
-        a = actuals.get(key, {"actual": 0.0, "paid": 0.0})
+        a = actuals.get(key, {"actual": 0.0, "paid": 0.0, "back": 0.0})
         actual = _r(a["actual"])
         var = _r(target - actual) if target is not None else None
         if target is None:
@@ -441,7 +411,7 @@ def variance(
         else:
             status = "under" if var > 0 else "over"
         rows.append(VarianceRow(category=name, target=target, actual=actual,
-                                paid=_r(a["paid"]), variance=var, status=status))
+                                paid=_r(a["paid"]), reimbursed=_r(a["back"]), variance=var, status=status))
     rows.sort(key=lambda x: (-x.actual, x.category.lower()))
 
     total_target = _r(sum(r.target for r in rows if r.target is not None))
@@ -464,9 +434,18 @@ def export(conn: sqlite3.Connection = Conn, uid: int = Me):
 
     data = {
         "exported_on": date.today().isoformat(),
-        "expenses": rows("SELECT id, name, amount, due_date, category, recurring, anchor_day, paid, paid_on,"
+        "expenses": rows("SELECT id, name, amount, reimbursed, reimbursed_note, payment_mode, card_id, due_date, category, recurring, anchor_day, paid, paid_on,"
                          " generated_from FROM expenses WHERE user_id=? ORDER BY due_date, id"),
         "budgets": rows("SELECT category, monthly_target FROM budgets WHERE user_id=? ORDER BY category"),
+        "cards": rows("SELECT id, name, kind, statement_day, due_day FROM cards WHERE user_id=? ORDER BY id"),
+        "emis": rows("SELECT id, card_id, name, category, monthly_amount, first_date, months FROM emis"
+                     " WHERE user_id=? ORDER BY id"),
+        "card_payments": rows("SELECT card_id, statement_date, amount, paid_on FROM card_payments"
+                              " WHERE user_id=? ORDER BY paid_on, id"),
+        "loans": rows("SELECT id, person, amount, lent_on, due_date, note, remind_every_days, next_remind_on"
+                      " FROM loans WHERE user_id=? ORDER BY id"),
+        "loan_repayments": rows("SELECT r.loan_id, r.amount, r.paid_on FROM loan_repayments r"
+                                " JOIN loans l ON l.id = r.loan_id WHERE l.user_id=? ORDER BY r.paid_on, r.id"),
         "settings": {r["key"]: r["value"] for r in rows("SELECT key, value FROM settings WHERE user_id=?")},
     }
     return JSONResponse(data, headers={

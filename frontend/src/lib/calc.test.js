@@ -83,3 +83,18 @@ describe('withDefaults', () => {
     expect(withDefaults([])).toEqual(DEFAULT_CATEGORIES);
   });
 });
+
+describe('paid back by someone else', () => {
+  const card = { name: 'Card', amount: 11000, category: 'Cards', paid: false, reimbursed: 4000 };
+  it('leaves the bill in full but only counts your share against the budget', () => {
+    const s = summarize([card, e('rent', 2000, 'Rent', true)], 10000);
+    expect(s).toMatchObject({
+      paid: 2000, unpaid: 11000, scheduled: 13000, reimbursed: 4000, own: 9000,
+      paidOwn: 2000, unpaidOwn: 7000, remaining: 1000, remainingAfterPaid: 8000, percentCommitted: 90,
+    });
+  });
+  it('keeps a category under target when the overspend was paid back', () => {
+    const v = computeVariance([card], [{ category: 'Cards', monthly_target: 8000 }]);
+    expect(v.rows[0]).toMatchObject({ actual: 7000, reimbursed: 4000, variance: 1000, status: 'under' });
+  });
+});

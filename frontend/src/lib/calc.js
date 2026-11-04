@@ -4,47 +4,63 @@
 export const ALERT_DAYS = 3;
 const round2 = (n) => Math.round(n * 100) / 100;
 
-/** Remaining budget = total budget - everything dated in the month (paid, still to pay, projected). */
+/** What you spent yourself on a bill: the amount less anything someone paid back to you. */
+export const ownShare = (e) => e.amount - (e.reimbursed || 0);
+
+/**
+ * Remaining budget = total budget - your own spend: everything dated in the month (paid, still
+ * to pay, projected) less what others paid back. `paid` / `unpaid` stay full bill amounts.
+ */
 export function summarize(expenses, totalBudget) {
   let paid = 0;
   let unpaid = 0;
   let projected = 0;
+  let paidBack = 0;
+  let unpaidBack = 0;
   for (const e of expenses) {
-    if (e.paid) paid += e.amount;
-    else unpaid += e.amount;
+    const back = e.reimbursed || 0;
+    if (e.paid) { paid += e.amount; paidBack += back; }
+    else { unpaid += e.amount; unpaidBack += back; }
     if (e.projected) projected += e.amount;
   }
   const scheduled = paid + unpaid;
+  const reimbursed = paidBack + unpaidBack;
+  const own = scheduled - reimbursed;
   return {
     totalBudget,
     paid: round2(paid),
     unpaid: round2(unpaid),
     projected: round2(projected), // part of unpaid: recurring bills not created yet
     scheduled: round2(scheduled),
-    remaining: round2(totalBudget - scheduled),
-    remainingAfterPaid: round2(totalBudget - paid),
-    percentCommitted: totalBudget > 0 ? round2((scheduled / totalBudget) * 100) : 0,
+    reimbursed: round2(reimbursed),
+    own: round2(own),
+    paidOwn: round2(paid - paidBack),
+    unpaidOwn: round2(unpaid - unpaidBack),
+    remaining: round2(totalBudget - own),
+    remainingAfterPaid: round2(totalBudget - (paid - paidBack)),
+    percentCommitted: totalBudget > 0 ? round2((own / totalBudget) * 100) : 0,
   };
 }
 
-/** variance = target - actual. Positive = under target (good), negative = over. */
+/** variance = target - actual (your own share). Positive = under target (good), negative = over. */
 export function computeVariance(expenses, budgets) {
   const map = new Map();
   for (const b of budgets) {
-    map.set(b.category.toLowerCase(), { category: b.category, target: b.monthly_target, actual: 0, paid: 0 });
+    map.set(b.category.toLowerCase(), { category: b.category, target: b.monthly_target, actual: 0, paid: 0, reimbursed: 0 });
   }
   for (const e of expenses) {
     const key = e.category.toLowerCase();
-    if (!map.has(key)) map.set(key, { category: e.category, target: null, actual: 0, paid: 0 });
+    if (!map.has(key)) map.set(key, { category: e.category, target: null, actual: 0, paid: 0, reimbursed: 0 });
     const row = map.get(key);
-    row.actual += e.amount;
-    if (e.paid) row.paid += e.amount;
+    row.actual += ownShare(e);
+    row.reimbursed += e.reimbursed || 0;
+    if (e.paid) row.paid += ownShare(e);
   }
   const rows = [...map.values()].map((r) => {
     const actual = round2(r.actual);
     const variance = r.target == null ? null : round2(r.target - actual);
     const status = variance == null ? 'no_target' : variance === 0 ? 'on' : variance > 0 ? 'under' : 'over';
-    return { ...r, actual, paid: round2(r.paid), variance, status };
+    return { ...r, actual, paid: round2(r.paid), reimbursed: round2(r.reimbursed), variance, status };
   });
   // Worst overspend first, then healthy categories, then un-targeted spending.
   rows.sort((a, b) => {

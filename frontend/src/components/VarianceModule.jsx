@@ -68,6 +68,7 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
                 </div>
                 <p className="num mt-1 text-xs text-stone-500 dark:text-stone-400">
                   {money(r.actual)} {r.target != null ? `of ${money(r.target)}` : 'spent'} · {t.note}
+                  {r.reimbursed > 0 && ` · ${money(r.reimbursed)} paid back not counted`}
                 </p>
               </li>
             );
@@ -75,7 +76,8 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
         </ul>
       )}
       <p className="mt-4 text-[11px] text-stone-400 dark:text-stone-500">
-        + means under target (good) · − means over target. Actual counts every bill dated in the month, paid or not.
+        + means under target (good) · − means over target. Actual counts every bill dated in the month, paid or
+        not, minus anything someone paid back to you.
       </p>
     </section>
   );
