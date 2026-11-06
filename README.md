@@ -50,8 +50,11 @@ targets and budget. Someone else's expense id simply returns 404.
 
 ## Use it on your phone
 
-To record expenses from your iPhone anywhere (laptop off), deploy it to Fly.io and add it to your home
-screen. It installs as an app with its own icon and opens full-screen. Step-by-step: **[DEPLOY.md](DEPLOY.md)**.
+To record expenses from your iPhone anywhere (laptop off), put it on a server and add it to your home
+screen. It installs as an app with its own icon and opens full-screen. Two step-by-step guides:
+
+- **Free:** an Oracle Cloud Always Free computer, set up with one command — **[DEPLOY-FREE.md](DEPLOY-FREE.md)**.
+- **Paid, simplest:** Fly.io — **[DEPLOY.md](DEPLOY.md)**.
 
 ## What's in the dashboard
 

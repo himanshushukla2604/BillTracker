@@ -1,5 +1,7 @@
 # Put Bill Tracker online and install it on your iPhone
 
+> Fly.io charges for this. For a free option, see [DEPLOY-FREE.md](DEPLOY-FREE.md).
+
 Once this is done the app runs on Fly.io at `https://<your-app>.fly.dev`, so you can record
 expenses from your phone anywhere, with your laptop switched off. Your data lives in a SQLite file
 on a private disk attached to that server.
