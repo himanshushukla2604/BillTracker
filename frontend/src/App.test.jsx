@@ -410,8 +410,10 @@ it('records money paid back and closes the loan', async () => {
 const hdfc = () => ({
   id: 1, name: 'HDFC', kind: 'credit', statement_day: 15, due_day: 5, due_now: 4200, charged_this_cycle: 800, emi_remaining: 4000,
   total_owed: 9000,
-  unpaid_statements: [{ statement_date: '2026-10-15', due_date: '2026-11-05', total: 4200, paid: 0, balance: 4200, overdue: true }],
-  current_statement: { statement_date: '2026-11-15', due_date: '2026-12-05', total: 2800, paid: 0, balance: 2800, overdue: false },
+  unpaid_statements: [{ statement_date: '2026-10-15', due_date: '2026-11-05', total: 4200, paid: 0, balance: 4200, overdue: true,
+    items: [{ date: '2026-10-10', name: 'Groceries', amount: 1200 }, { date: '2026-10-14', name: 'Shoes', amount: 3000 }] }],
+  current_statement: { statement_date: '2026-11-15', due_date: '2026-12-05', total: 2800, paid: 0, balance: 2800, overdue: false,
+    items: [{ date: '2026-10-25', name: 'Dinner', amount: 800 }, { date: '2026-11-20', name: 'iPhone EMI 2/3', amount: 2000 }] },
   emis: [{ id: 3, card_id: 1, name: 'iPhone', category: 'Electronics', monthly_amount: 2000, first_date: '2026-10-20',
     last_date: '2026-12-20', months: 3, months_done: 1, months_left: 2, remaining: 4000 }],
 });
@@ -426,6 +428,10 @@ it('shows what you owe each card and pays the bill from the timeline', async () 
   expect(within(cardsPanel()).getByTestId('card-total')).toHaveTextContent('₹9,000');
   expect(cardsPanel()).toHaveTextContent('EMIs still to come₹4,000');
   expect(cardsPanel()).toHaveTextContent('1 of 3 paid · ends Dec 2026');
+  // each bill lists the purchases on it
+  expect(within(cardsPanel()).getAllByText('2 items on this bill', { selector: 'summary' })).toHaveLength(2);
+  expect(cardsPanel()).toHaveTextContent('14 Oct · Shoes₹3,000');
+  expect(cardsPanel()).toHaveTextContent('20 Nov · iPhone EMI 2/3 · upcoming₹2,000');
   const row = [...timeline().querySelectorAll('li[data-urgency]')].find((li) => li.textContent.includes('HDFC bill'));
   expect(row).toHaveTextContent('Statement 15 Oct');
   expect(within(row).queryByRole('button', { name: 'Edit HDFC bill' })).toBeNull();

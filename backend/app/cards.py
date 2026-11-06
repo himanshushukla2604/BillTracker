@@ -249,6 +249,12 @@ class EmiOut(BaseModel):
     remaining: float  # instalments still to come
 
 
+class StatementItem(BaseModel):
+    date: date
+    name: str
+    amount: float
+
+
 class StatementOut(BaseModel):
     statement_date: date
     due_date: date
@@ -256,6 +262,7 @@ class StatementOut(BaseModel):
     paid: float
     balance: float
     overdue: bool
+    items: list[StatementItem]  # purchases and EMI instalments on this bill, by date
 
 
 class CardOut(BaseModel):
@@ -307,7 +314,8 @@ def card_out(conn: sqlite3.Connection, uid: int, card: sqlite3.Row, today: date)
 
     def st_out(st: Statement) -> StatementOut:
         return StatementOut(statement_date=st.statement_date, due_date=st.due_date, total=st.total,
-                            paid=_r(st.paid), balance=st.balance, overdue=st.balance > 0 and st.due_date < today)
+                            paid=_r(st.paid), balance=st.balance, overdue=st.balance > 0 and st.due_date < today,
+                            items=[StatementItem(date=d, name=n, amount=a) for d, n, a in sorted(st.items)])
 
     due_now = _r(sum(st.balance for st in unpaid))
     charged = _r(max((current.charged_so_far - current.paid) if current else 0, 0))

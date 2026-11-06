@@ -79,43 +79,49 @@ export default function CardsPanel({ cards, categories, todayISO, onSaveCard, on
               </div>
             </div>
 
-            <dl className="num mt-3 space-y-2 text-sm">
+            <div className="num mt-3 space-y-2 text-sm">
               {c.unpaid_statements.map((st) => (
-                <div key={st.statement_date} className="flex items-center justify-between gap-2">
-                  <dt className={st.overdue ? 'text-rose-600 dark:text-rose-400' : 'text-stone-600 dark:text-stone-300'}>
-                    Bill due {shortDate(st.due_date)}{st.overdue && ' · overdue'}
-                    <span className="block text-[11px] text-stone-500 dark:text-stone-400">
-                      statement {shortDate(st.statement_date)}{st.paid > 0 && ` · ${money(st.paid)} paid`}
-                    </span>
-                  </dt>
-                  <dd className="flex items-center gap-2 font-medium">
-                    {money(st.balance)}
-                    <button className="btn-outline px-2 py-1 text-xs" onClick={() => onPay(c, st)}
-                      aria-label={`Pay ${c.name} bill due ${shortDate(st.due_date)}`}>
-                      Pay
-                    </button>
-                  </dd>
+                <div key={st.statement_date}>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={st.overdue ? 'text-rose-600 dark:text-rose-400' : 'text-stone-600 dark:text-stone-300'}>
+                      Bill due {shortDate(st.due_date)}{st.overdue && ' · overdue'}
+                      <span className="block text-[11px] text-stone-500 dark:text-stone-400">
+                        statement {shortDate(st.statement_date)}{st.paid > 0 && ` · ${money(st.paid)} paid`}
+                      </span>
+                    </p>
+                    <p className="flex items-center gap-2 font-medium">
+                      {money(st.balance)}
+                      <button className="btn-outline px-2 py-1 text-xs" onClick={() => onPay(c, st)}
+                        aria-label={`Pay ${c.name} bill due ${shortDate(st.due_date)}`}>
+                        Pay
+                      </button>
+                    </p>
+                  </div>
+                  <BillItems items={st.items} todayISO={todayISO} />
                 </div>
               ))}
               {c.current_statement && (
-                <div className="flex items-center justify-between gap-2">
-                  <dt className="text-stone-600 dark:text-stone-300">
-                    This cycle so far
-                    <span className="block text-[11px] text-stone-500 dark:text-stone-400">
-                      statement {shortDate(c.current_statement.statement_date)} · due {shortDate(c.current_statement.due_date)}
-                      {c.current_statement.total > c.charged_this_cycle && ` · about ${money(c.current_statement.total)} expected`}
-                    </span>
-                  </dt>
-                  <dd className="font-medium">{money(c.charged_this_cycle)}</dd>
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-stone-600 dark:text-stone-300">
+                      This cycle so far
+                      <span className="block text-[11px] text-stone-500 dark:text-stone-400">
+                        statement {shortDate(c.current_statement.statement_date)} · due {shortDate(c.current_statement.due_date)}
+                        {c.current_statement.total > c.charged_this_cycle && ` · about ${money(c.current_statement.total)} expected`}
+                      </span>
+                    </p>
+                    <p className="font-medium">{money(c.charged_this_cycle)}</p>
+                  </div>
+                  <BillItems items={c.current_statement.items} todayISO={todayISO} />
                 </div>
               )}
               {c.emi_remaining > 0 && (
                 <div className="flex items-center justify-between gap-2">
-                  <dt className="text-stone-600 dark:text-stone-300">EMIs still to come</dt>
-                  <dd className="font-medium">{money(c.emi_remaining)}</dd>
+                  <p className="text-stone-600 dark:text-stone-300">EMIs still to come</p>
+                  <p className="font-medium">{money(c.emi_remaining)}</p>
                 </div>
               )}
-            </dl>
+            </div>
 
             {c.emis.length > 0 && (
               <ul className="mt-3 space-y-1.5 border-t border-stone-100 pt-2 dark:border-neutral-800">
@@ -176,6 +182,28 @@ export default function CardsPanel({ cards, categories, todayISO, onSaveCard, on
           onSubmit={async (payload) => { await onSaveEmi(emiForm.card, payload, emiForm.emi?.id); setEmiForm(null); }} />
       )}
     </section>
+  );
+}
+
+/** The purchases and EMI instalments that make up one card bill, folded away until asked for. */
+function BillItems({ items, todayISO }) {
+  if (!items?.length) return null;
+  return (
+    <details className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+      <summary className="cursor-pointer select-none text-emerald-700 dark:text-emerald-400">
+        {items.length} item{items.length === 1 ? '' : 's'} on this bill
+      </summary>
+      <ul className="mt-1 space-y-1 border-l-2 border-stone-100 pl-2 dark:border-neutral-800">
+        {items.map((i, k) => (
+          <li key={k} className="flex justify-between gap-3">
+            <span className="min-w-0 truncate">
+              {shortDate(i.date)} · {i.name}{i.date > todayISO && <span className="text-stone-400"> · upcoming</span>}
+            </span>
+            <span className="shrink-0">{money(i.amount)}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

@@ -777,6 +777,10 @@ def test_card_purchases_become_a_bill_instead_of_bills_each(client):
     assert c["current_statement"]["statement_date"] == "2026-11-15"
     assert c["current_statement"]["due_date"] == "2026-12-05"
     assert c["total_owed"] == 5000
+    # each bill lists what is on it
+    assert [(i["date"], i["name"], i["amount"]) for i in c["unpaid_statements"][0]["items"]] == [
+        ("2026-10-10", "Groceries", 1200), ("2026-10-14", "Shoes", 3000)]
+    assert [i["name"] for i in c["current_statement"]["items"]] == ["Dinner"]
 
     # paying the statement clears it; undo brings it back
     paid = client.post(f"/api/cards/{card['id']}/pay", params=T, json={"statement_date": "2026-10-15"}).json()
