@@ -13,7 +13,7 @@ const monthYear = (iso) => parseISO(iso).toLocaleDateString('en-IN', { month: 's
 
 /** Credit cards: what is due now, what has built up this cycle, and EMIs still to come.
  *  Debit cards are listed by name so a payment can say which one it came from. */
-export default function CardsPanel({ cards, categories, todayISO, onSaveCard, onDeleteCard, onPay, onSaveEmi, onDeleteEmi, className = '' }) {
+export default function CardsPanel({ cards, categories, todayISO, onSaveCard, onDeleteCard, onPay, onSaveEmi, onDeleteEmi, onEditItem, className = '' }) {
   const [cardForm, setCardForm] = useState(null); // null | { card? }
   const [emiForm, setEmiForm] = useState(null); // null | { card, emi? }
   const [confirm, setConfirm] = useState(null); // 'card-1' | 'emi-3'
@@ -97,7 +97,7 @@ export default function CardsPanel({ cards, categories, todayISO, onSaveCard, on
                       </button>
                     </p>
                   </div>
-                  <BillItems items={st.items} todayISO={todayISO} />
+                  <BillItems items={st.items} todayISO={todayISO} onEdit={onEditItem} />
                 </div>
               ))}
               {c.current_statement && (
@@ -112,7 +112,7 @@ export default function CardsPanel({ cards, categories, todayISO, onSaveCard, on
                     </p>
                     <p className="font-medium">{money(c.charged_this_cycle)}</p>
                   </div>
-                  <BillItems items={c.current_statement.items} todayISO={todayISO} />
+                  <BillItems items={c.current_statement.items} todayISO={todayISO} onEdit={onEditItem} />
                 </div>
               )}
               {c.emi_remaining > 0 && (
@@ -186,7 +186,7 @@ export default function CardsPanel({ cards, categories, todayISO, onSaveCard, on
 }
 
 /** The purchases and EMI instalments that make up one card bill, folded away until asked for. */
-function BillItems({ items, todayISO }) {
+function BillItems({ items, todayISO, onEdit }) {
   if (!items?.length) return null;
   return (
     <details className="mt-1 text-xs text-stone-500 dark:text-stone-400">
@@ -195,11 +195,18 @@ function BillItems({ items, todayISO }) {
       </summary>
       <ul className="mt-1 space-y-1 border-l-2 border-stone-100 pl-2 dark:border-neutral-800">
         {items.map((i, k) => (
-          <li key={k} className="flex justify-between gap-3">
+          <li key={k} className="flex items-center justify-between gap-3">
             <span className="min-w-0 truncate">
               {shortDate(i.date)} · {i.name}{i.date > todayISO && <span className="text-stone-400"> · upcoming</span>}
             </span>
-            <span className="shrink-0">{money(i.amount)}</span>
+            <span className="flex shrink-0 items-center gap-1">
+              {money(i.amount)}
+              {i.expense_id != null && onEdit && (
+                <button className="btn-ghost p-1" onClick={() => onEdit(i.expense_id)} aria-label={`Edit ${i.name}`} title="Edit">
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </span>
           </li>
         ))}
       </ul>

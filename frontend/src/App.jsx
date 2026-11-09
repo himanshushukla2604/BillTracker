@@ -175,6 +175,8 @@ function Dashboard({ user, onLogout, onSessionLost }) {
     onDeleteCard: (c) => run(() => api.removeCard(c.id), `${c.name} removed`),
     onDeleteEmi: (e) => run(() => api.removeEmi(e.id), `${e.name} EMI removed`),
     onPay: (c, st) => payCardBill(c, st, `${c.name} bill`),
+    // a bill can hold purchases from other months, so fetch the one asked for
+    onEditItem: (id) => run(async () => setForm({ expense: await api.expense(id) }), null),
   };
 
   const saveTargets = async ({ upserts, deletes }) => {

@@ -85,7 +85,7 @@ class Statement:
     emis: float = 0.0
     paid: float = 0.0
     charged_so_far: float = 0.0  # part dated today or earlier
-    items: list[tuple[date, str, float]] = field(default_factory=list)
+    items: list[tuple[date, str, float, Optional[int]]] = field(default_factory=list)  # (date, name, amount, expense id)
 
     @property
     def total(self) -> float:
@@ -116,7 +116,7 @@ def statements(conn: sqlite3.Connection, uid: int, card: sqlite3.Row, today: dat
     horizon = today + timedelta(days=HORIZON_DAYS)
     by_date: dict[date, Statement] = {}
 
-    def add(d: date, label: str, amount: float, emi: bool) -> None:
+    def add(d: date, label: str, amount: float, emi: bool, expense_id: Optional[int] = None) -> None:
         sd = statement_for(d, s_day)
         st = by_date.setdefault(sd, Statement(sd, due_for(sd, s_day, d_day)))
         if emi:
@@ -125,12 +125,12 @@ def statements(conn: sqlite3.Connection, uid: int, card: sqlite3.Row, today: dat
             st.purchases += amount
         if d <= today:
             st.charged_so_far += amount
-        st.items.append((d, label, amount))
+        st.items.append((d, label, amount, expense_id))
 
-    for row in conn.execute("SELECT name, amount, due_date FROM expenses WHERE user_id=? AND card_id=?"
+    for row in conn.execute("SELECT id, name, amount, due_date FROM expenses WHERE user_id=? AND card_id=?"
                             " AND payment_mode='credit_card' AND due_date <= ?",
                             (uid, card["id"], horizon.isoformat())):
-        add(date.fromisoformat(row["due_date"]), row["name"], row["amount"], emi=False)
+        add(date.fromisoformat(row["due_date"]), row["name"], row["amount"], emi=False, expense_id=row["id"])
     for p in projections(conn, uid, today, horizon, today):
         if p.card_id == card["id"] and p.payment_mode == "credit_card":
             add(p.due_date, p.name, p.amount, emi=False)
@@ -253,6 +253,7 @@ class StatementItem(BaseModel):
     date: date
     name: str
     amount: float
+    expense_id: Optional[int] = None  # set for a stored purchase, which can be edited
 
 
 class StatementOut(BaseModel):
@@ -315,7 +316,8 @@ def card_out(conn: sqlite3.Connection, uid: int, card: sqlite3.Row, today: date)
     def st_out(st: Statement) -> StatementOut:
         return StatementOut(statement_date=st.statement_date, due_date=st.due_date, total=st.total,
                             paid=_r(st.paid), balance=st.balance, overdue=st.balance > 0 and st.due_date < today,
-                            items=[StatementItem(date=d, name=n, amount=a) for d, n, a in sorted(st.items)])
+                            items=[StatementItem(date=d, name=n, amount=a, expense_id=x)
+                                   for d, n, a, x in sorted(st.items, key=lambda i: i[:2])])
 
     due_now = _r(sum(st.balance for st in unpaid))
     charged = _r(max((current.charged_so_far - current.paid) if current else 0, 0))

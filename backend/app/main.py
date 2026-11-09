@@ -158,6 +158,12 @@ def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.
     return _to_out(_get_row(conn, uid, cur.lastrowid), _today(today))
 
 
+@app.get("/api/expenses/{expense_id}", response_model=ExpenseOut)
+def get_expense(expense_id: int, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
+                uid: int = Me):
+    return _to_out(_get_row(conn, uid, expense_id), _today(today))
+
+
 @app.put("/api/expenses/{expense_id}", response_model=ExpenseOut)
 def update_expense(expense_id: int, body: ExpenseIn, today: Optional[date] = None,
                    conn: sqlite3.Connection = Conn, uid: int = Me):
