@@ -38,6 +38,7 @@ export const api = {
   budgets: () => req('GET', '/budgets'),
   settings: () => req('GET', '/settings'),
   categories: () => req('GET', '/categories'),
+  expense: (id) => req('GET', `/expenses/${id}`),
   create: (body) => req('POST', '/expenses', { body }),
   update: (id, body) => req('PUT', `/expenses/${id}`, { body }),
   remove: (id) => req('DELETE', `/expenses/${id}`),

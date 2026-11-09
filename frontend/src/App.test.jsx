@@ -90,6 +90,13 @@ function fakeFetch(url, init = {}) {
     e.paid = true;
     return ok(decorate(e));
   }
+  const one = p.match(/^\/api\/expenses\/(\d+)$/);
+  if (one && method === 'GET') return ok(decorate(store.expenses.find((x) => x.id === Number(one[1]))));
+  if (one && method === 'PUT') {
+    const e = store.expenses.find((x) => x.id === Number(one[1]));
+    Object.assign(e, body);
+    return ok(decorate(e));
+  }
   throw new Error(`unhandled ${method} ${p}`);
 }
 
@@ -411,7 +418,8 @@ const hdfc = () => ({
   id: 1, name: 'HDFC', kind: 'credit', statement_day: 15, due_day: 5, due_now: 4200, charged_this_cycle: 800, emi_remaining: 4000,
   total_owed: 9000,
   unpaid_statements: [{ statement_date: '2026-10-15', due_date: '2026-11-05', total: 4200, paid: 0, balance: 4200, overdue: true,
-    items: [{ date: '2026-10-10', name: 'Groceries', amount: 1200 }, { date: '2026-10-14', name: 'Shoes', amount: 3000 }] }],
+    items: [{ date: '2026-10-10', name: 'Groceries', amount: 1200, expense_id: 40 },
+      { date: '2026-10-14', name: 'Shoes', amount: 3000, expense_id: 41 }] }],
   current_statement: { statement_date: '2026-11-15', due_date: '2026-12-05', total: 2800, paid: 0, balance: 2800, overdue: false,
     items: [{ date: '2026-10-25', name: 'Dinner', amount: 800 }, { date: '2026-11-20', name: 'iPhone EMI 2/3', amount: 2000 }] },
   emis: [{ id: 3, card_id: 1, name: 'iPhone', category: 'Electronics', monthly_amount: 2000, first_date: '2026-10-20',
@@ -438,6 +446,27 @@ it('shows what you owe each card and pays the bill from the timeline', async () 
   await user.click(within(row).getByRole('button', { name: 'Mark HDFC bill as paid' }));
   await waitFor(() => expect(rowsOf(timeline()).map((r) => r[0])).not.toContain('HDFC bill'));
   expect(calls.find((c) => c.path === '/api/cards/1/pay').body).toEqual({ statement_date: '2026-10-15' });
+});
+
+it('a purchase on a card bill can be edited from the bill, even from another month', async () => {
+  const user = userEvent.setup();
+  const icici = { ...hdfc(), id: 2, name: 'ICICI', unpaid_statements: [], current_statement: null, emis: [] };
+  store.cards = [hdfc(), icici];
+  store.expenses.push({ id: 41, name: 'Shoes', amount: 3000, due_date: '2026-10-14', category: 'Shopping', paid: true,
+    payment_mode: 'credit_card', card_id: 1 });
+  await renderApp();
+  const panel = cardsPanel();
+  await user.click(within(panel).getAllByText('2 items on this bill', { selector: 'summary' })[0]);
+  // EMI instalments are edited from the EMI list, so only purchases get a button here
+  expect(within(panel).queryByRole('button', { name: 'Edit iPhone EMI 2/3' })).toBeNull();
+  await user.click(within(panel).getByRole('button', { name: 'Edit Shoes' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Edit expense' });
+  expect(within(dialog).getByLabelText('Expense name')).toHaveValue('Shoes');
+  await user.selectOptions(within(dialog).getByLabelText('Card'), '2');
+  await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'PUT' && c.path === '/api/expenses/41').body).toMatchObject({
+    name: 'Shoes', payment_mode: 'credit_card', card_id: 2 });
 });
 
 it('a purchase can be paid by credit card', async () => {
