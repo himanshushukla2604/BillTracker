@@ -1,5 +1,6 @@
 import { SlidersHorizontal } from 'lucide-react';
-import { money, signedMoney } from '../lib/format';
+import { money, shortDate, signedMoney } from '../lib/format';
+import { itemKey } from '../lib/urgency';
 
 const TONE = {
   under: { text: 'text-emerald-600 dark:text-emerald-400', bar: 'bg-emerald-500', note: 'under target' },
@@ -70,6 +71,7 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
                   {money(r.actual)} {r.target != null ? `of ${money(r.target)}` : 'spent'} · {t.note}
                   {r.reimbursed > 0 && ` · ${money(r.reimbursed)} paid back not counted`}
                 </p>
+                <CategoryItems items={r.items} />
               </li>
             );
           })}
@@ -80,5 +82,31 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
         not, minus anything someone paid back to you.
       </p>
     </section>
+  );
+}
+
+/** The month's expenses in one category, folded away until asked for. */
+function CategoryItems({ items }) {
+  if (!items.length) return null;
+  return (
+    <details className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+      <summary className="cursor-pointer select-none text-emerald-700 dark:text-emerald-400">
+        {items.length} expense{items.length === 1 ? '' : 's'}
+      </summary>
+      <ul className="mt-1 space-y-1 border-l-2 border-stone-100 pl-2 dark:border-neutral-800">
+        {items.map((e) => (
+          <li key={itemKey(e)} className="flex justify-between gap-3">
+            <span className="min-w-0 truncate">
+              {shortDate(e.due_date)} · {e.name}
+              {e.projected && <span className="text-stone-400"> · projected</span>}
+            </span>
+            <span className="num shrink-0">
+              {money(e.amount)}
+              {e.reimbursed > 0 && <span className="text-sky-700 dark:text-sky-400"> −{money(e.reimbursed)} back</span>}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

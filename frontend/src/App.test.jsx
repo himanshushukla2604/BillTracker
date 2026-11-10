@@ -171,6 +171,18 @@ it('computes the remaining budget and spend variance', async () => {
   expect(document.querySelector('li[data-status="under"]')).toHaveTextContent('+₹550');
 });
 
+it('lists the month\'s expenses under each category', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  store.expenses.push({ id: 6, name: 'Dinner out', amount: 900, due_date: '2026-11-07', category: 'food', paid: true,
+    reimbursed: 400, reimbursed_note: 'Rahul' });
+  await renderApp();
+  const food = [...screen.getByRole('region', { name: 'Spend variance' }).querySelectorAll('li[data-status]')]
+    .find((li) => li.textContent.startsWith('Food'));
+  await user.click(within(food).getByText('2 expenses', { selector: 'summary' }));
+  expect(food).toHaveTextContent('3 Nov · Groceries₹1,240');
+  expect(food).toHaveTextContent('7 Nov · Dinner out₹900 −₹400 back');
+});
+
 it('updates the remaining budget live while the budget is edited', async () => {
   const user = userEvent.setup({ advanceTimers: () => {} });
   await renderApp();

@@ -2,7 +2,7 @@ import { computeVariance, summarize } from './calc';
 import { DEFAULT_CATEGORIES, withDefaults } from './categories';
 import { money, signedMoney, localISO, shiftMonth, dayLabel } from './format';
 
-const e = (name, amount, category, paid = false) => ({ name, amount, category, paid });
+const e = (name, amount, category, paid = false, due_date = '2026-11-01') => ({ name, amount, category, paid, due_date });
 
 describe('summarize', () => {
   it('remaining = budget - (paid + unpaid)', () => {
@@ -33,6 +33,15 @@ describe('computeVariance', () => {
     budgets,
   );
   const row = (c) => v.rows.find((r) => r.category === c);
+
+  it('lists each category\'s expenses by date, matching the category name in any case', () => {
+    const w = computeVariance(
+      [e('dinner', 600, 'Food', false, '2026-11-20'), e('lunch', 300, 'food', false, '2026-11-05')],
+      budgets,
+    );
+    expect(w.rows.find((r) => r.category === 'Food').items.map((i) => i.name)).toEqual(['lunch', 'dinner']);
+    expect(w.rows.find((r) => r.category === 'Rent').items).toEqual([]);
+  });
 
   it('uses target - actual with the right sign and status', () => {
     expect(row('Food')).toMatchObject({ variance: -300, status: 'over', actual: 1300 });

@@ -46,12 +46,13 @@ export function summarize(expenses, totalBudget) {
 export function computeVariance(expenses, budgets) {
   const map = new Map();
   for (const b of budgets) {
-    map.set(b.category.toLowerCase(), { category: b.category, target: b.monthly_target, actual: 0, paid: 0, reimbursed: 0 });
+    map.set(b.category.toLowerCase(), { category: b.category, target: b.monthly_target, actual: 0, paid: 0, reimbursed: 0, items: [] });
   }
   for (const e of expenses) {
     const key = e.category.toLowerCase();
-    if (!map.has(key)) map.set(key, { category: e.category, target: null, actual: 0, paid: 0, reimbursed: 0 });
+    if (!map.has(key)) map.set(key, { category: e.category, target: null, actual: 0, paid: 0, reimbursed: 0, items: [] });
     const row = map.get(key);
+    row.items.push(e);
     row.actual += ownShare(e);
     row.reimbursed += e.reimbursed || 0;
     if (e.paid) row.paid += ownShare(e);
@@ -60,7 +61,8 @@ export function computeVariance(expenses, budgets) {
     const actual = round2(r.actual);
     const variance = r.target == null ? null : round2(r.target - actual);
     const status = variance == null ? 'no_target' : variance === 0 ? 'on' : variance > 0 ? 'under' : 'over';
-    return { ...r, actual, paid: round2(r.paid), reimbursed: round2(r.reimbursed), variance, status };
+    const items = [...r.items].sort((a, b) => a.due_date.localeCompare(b.due_date) || a.name.localeCompare(b.name));
+    return { ...r, actual, paid: round2(r.paid), reimbursed: round2(r.reimbursed), variance, status, items };
   });
   // Worst overspend first, then healthy categories, then un-targeted spending.
   rows.sort((a, b) => {
