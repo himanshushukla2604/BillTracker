@@ -56,6 +56,7 @@ def to_out(row: sqlite3.Row, today: date) -> ExpenseOut:
         generated_from=row["generated_from"],
         payment_mode=row["payment_mode"],
         card_id=row["card_id"],
+        goal_id=row["goal_id"],
         days_left=days_left,
         urgency=urgency(paid, days_left),
     )
@@ -88,7 +89,7 @@ def projections(conn: sqlite3.Connection, uid: int, start: date, end: date, toda
                     category=row["category"], recurring=row["recurring"], paid=False,
                     days_left=days_left, urgency=urgency(False, days_left),
                     projected=True, projected_from=row["id"],
-                    payment_mode=row["payment_mode"], card_id=row["card_id"],
+                    payment_mode=row["payment_mode"], card_id=row["card_id"], goal_id=row["goal_id"],
                 ))
     return out
 

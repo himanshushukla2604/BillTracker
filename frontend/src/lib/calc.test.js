@@ -1,4 +1,4 @@
-import { computeVariance, summarize } from './calc';
+import { computeVariance, spendByCategory, summarize } from './calc';
 import { DEFAULT_CATEGORIES, withDefaults } from './categories';
 import { money, signedMoney, localISO, shiftMonth, dayLabel } from './format';
 
@@ -105,5 +105,27 @@ describe('paid back by someone else', () => {
   it('keeps a category under target when the overspend was paid back', () => {
     const v = computeVariance([card], [{ category: 'Cards', monthly_target: 8000 }]);
     expect(v.rows[0]).toMatchObject({ actual: 7000, reimbursed: 4000, variance: 1000, status: 'under' });
+  });
+});
+
+describe('goals', () => {
+  const rods = { ...e('rods', 100000, 'Construction', true), goal_id: 1 };
+  it('keeps goal spending out of the monthly summary and targets', () => {
+    expect(summarize([e('a', 300, 'Food', true), rods], 1000)).toMatchObject({ paid: 300, remaining: 700 });
+    const v = computeVariance([e('a', 300, 'Food'), rods], [{ category: 'Construction', monthly_target: 500 }]);
+    expect(v.rows.find((r) => r.category === 'Construction')).toMatchObject({ actual: 0, status: 'under' });
+    expect(v.totalActual).toBe(300);
+  });
+});
+
+describe('spendByCategory', () => {
+  it('ranks categories by your own share, largest first, merging case and dropping fully repaid ones', () => {
+    const { rows, total } = spendByCategory([
+      e('lunch', 300, 'food'), e('dinner', 900, 'Food'), e('rent', 5000, 'Rent'),
+      { ...e('trip', 2000, 'Travel'), reimbursed: 2000 }, { ...e('cab', 1000, 'Transport'), reimbursed: 400 },
+    ]);
+    expect(rows.map((r) => [r.category, r.amount])).toEqual([['Rent', 5000], ['food', 1200], ['Transport', 600]]);
+    expect(total).toBe(6800);
+    expect(rows[1].items.map((i) => i.name)).toEqual(['dinner', 'lunch']); // same date: by name
   });
 });

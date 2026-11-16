@@ -1,6 +1,6 @@
-import { SlidersHorizontal } from 'lucide-react';
+import { Pencil, SlidersHorizontal } from 'lucide-react';
 import { money, shortDate, signedMoney } from '../lib/format';
-import { itemKey } from '../lib/urgency';
+import { isReadOnly, itemKey } from '../lib/urgency';
 
 const TONE = {
   under: { text: 'text-emerald-600 dark:text-emerald-400', bar: 'bg-emerald-500', note: 'under target' },
@@ -9,7 +9,7 @@ const TONE = {
   no_target: { text: 'text-stone-400 dark:text-stone-500', bar: 'bg-stone-400 dark:bg-neutral-600', note: 'no target set' },
 };
 
-export default function VarianceModule({ variance, monthLabel, onEditTargets, className = '' }) {
+export default function VarianceModule({ variance, monthLabel, onEditTargets, onEdit, className = '' }) {
   const { rows, totalVariance, totalTarget, totalActual, unbudgeted } = variance;
   const totalStatus = totalVariance > 0 ? 'under' : totalVariance < 0 ? 'over' : 'on';
   const tt = TONE[totalStatus];
@@ -71,7 +71,7 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
                   {money(r.actual)} {r.target != null ? `of ${money(r.target)}` : 'spent'} · {t.note}
                   {r.reimbursed > 0 && ` · ${money(r.reimbursed)} paid back not counted`}
                 </p>
-                <CategoryItems items={r.items} />
+                <CategoryItems items={r.items} onEdit={onEdit} />
               </li>
             );
           })}
@@ -86,7 +86,7 @@ export default function VarianceModule({ variance, monthLabel, onEditTargets, cl
 }
 
 /** The month's expenses in one category, folded away until asked for. */
-function CategoryItems({ items }) {
+function CategoryItems({ items, onEdit }) {
   if (!items.length) return null;
   return (
     <details className="mt-1 text-xs text-stone-500 dark:text-stone-400">
@@ -95,14 +95,19 @@ function CategoryItems({ items }) {
       </summary>
       <ul className="mt-1 space-y-1 border-l-2 border-stone-100 pl-2 dark:border-neutral-800">
         {items.map((e) => (
-          <li key={itemKey(e)} className="flex justify-between gap-3">
+          <li key={itemKey(e)} className="flex items-center justify-between gap-3">
             <span className="min-w-0 truncate">
               {shortDate(e.due_date)} · {e.name}
               {e.projected && <span className="text-stone-400"> · projected</span>}
             </span>
-            <span className="num shrink-0">
+            <span className="num flex shrink-0 items-center gap-1">
               {money(e.amount)}
               {e.reimbursed > 0 && <span className="text-sky-700 dark:text-sky-400"> −{money(e.reimbursed)} back</span>}
+              {onEdit && !isReadOnly(e) && (
+                <button className="btn-ghost p-1" onClick={() => onEdit(e)} aria-label={`Edit ${e.name}`} title="Edit">
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              )}
             </span>
           </li>
         ))}

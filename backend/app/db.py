@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS expenses (
     generated_from INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
     payment_mode   TEXT,                           -- cash | upi | debit_card | net_banking | credit_card
     card_id        INTEGER REFERENCES cards(id) ON DELETE SET NULL,  -- set when paid by credit card
+    goal_id        INTEGER REFERENCES goals(id) ON DELETE SET NULL,  -- spending towards a goal, not the month
     created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_user_due ON expenses(user_id, due_date);
@@ -110,6 +111,16 @@ CREATE TABLE IF NOT EXISTS loan_repayments (
     paid_on TEXT    NOT NULL
 );
 
+-- Something bigger than a month (a house, a car): its expenses stay out of the monthly budget.
+CREATE TABLE IF NOT EXISTS goals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,
+    budget      REAL    NOT NULL CHECK (budget > 0),  -- planned spending in all
+    target_date TEXT,
+    created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     key     TEXT NOT NULL,
@@ -117,7 +128,7 @@ CREATE TABLE IF NOT EXISTS settings (
     PRIMARY KEY (user_id, key)
 );
 """
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect() -> sqlite3.Connection:
@@ -148,8 +159,8 @@ def init_db() -> None:
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
-    """Additive upgrades (v1 -> v2 paid-back amounts, v2 -> v3 payment modes, v3 -> v4 debit cards): older databases
-    just gain the columns."""
+    """Additive upgrades (v1 -> v2 paid-back amounts, v2 -> v3 payment modes, v3 -> v4 debit cards,
+    v4 -> v5 goals): older databases just gain the columns."""
     have = {r[1] for r in conn.execute("PRAGMA table_info(expenses)")}
     if "reimbursed" not in have:
         conn.execute("ALTER TABLE expenses ADD COLUMN reimbursed REAL NOT NULL DEFAULT 0")
@@ -160,6 +171,9 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE expenses ADD COLUMN payment_mode TEXT")
     if "card_id" not in have:
         conn.execute("ALTER TABLE expenses ADD COLUMN card_id INTEGER REFERENCES cards(id) ON DELETE SET NULL")
+    # v4 -> v5: goals (the table itself comes from SCHEMA)
+    if "goal_id" not in have:
+        conn.execute("ALTER TABLE expenses ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL")
     # v3 -> v4: debit cards
     if "kind" not in {r[1] for r in conn.execute("PRAGMA table_info(cards)")}:
         conn.execute("ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'credit'")

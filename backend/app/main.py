@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, backup, cards, db, loans
+from . import auth, backup, cards, db, goals, loans
 from .ledger import (
     ALERT_WINDOW_DAYS, chronological as _chronological, month_bounds as _month_bounds, projections as _projections,
     r as _r, to_out as _to_out, today_or as _today,
@@ -43,6 +43,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(loans.router)
 app.include_router(cards.router)
+app.include_router(goals.router)
 
 Conn = Depends(db.get_conn)
 Me = Depends(auth.current_user)  # every data route is scoped to the logged-in user
@@ -86,13 +87,15 @@ def list_expenses(
     month: Optional[str] = Query(None, pattern=MONTH_PATTERN),
     status: Optional[str] = Query(None, pattern="^(paid|unpaid)$"),
     category: Optional[str] = None,
+    q: Optional[str] = Query(None, max_length=100),
+    goal_id: Optional[int] = None,
     projected: bool = True,
     today: Optional[date] = None,
     conn: sqlite3.Connection = Conn,
     uid: int = Me,
 ):
     """Stored bills, plus, when a month is given, projected recurring ones (`projected=false` to skip)
-    and EMI instalments dated in it."""
+    and EMI instalments dated in it. `q` searches stored bills by name, category, who paid back, or card."""
     t = _today(today)
     cards.charge_due(conn, uid, t)
     sql, args = "SELECT * FROM expenses WHERE user_id=?", [uid]
@@ -106,11 +109,20 @@ def list_expenses(
     if category:
         sql += " AND category = ? COLLATE NOCASE"
         args.append(category)
+    if goal_id is not None:
+        sql += " AND goal_id = ?"
+        args.append(goal_id)
+    if q and q.strip():
+        like = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql += (" AND (name LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\' OR reimbursed_note LIKE ? ESCAPE '\\'"
+                " OR card_id IN (SELECT id FROM cards WHERE user_id=? AND name LIKE ? ESCAPE '\\'))")
+        args += [like, like, like, uid, like]
     sql += " ORDER BY due_date, id"
     items = [_to_out(r, t) for r in conn.execute(sql, args)]
-    if month and projected and status != "paid":
+    stored_only = bool(q) or goal_id is not None  # searches and goal lists: only what can be edited
+    if month and projected and status != "paid" and not stored_only:
         items += _projections(conn, uid, start, end, t, category)
-    if month:
+    if month and not stored_only:
         items += [e for e in cards.emi_items(conn, uid, start, end, t)
                   if (not status or e.paid == (status == "paid"))
                   and (not category or e.category.lower() == category.lower())]
@@ -147,15 +159,20 @@ def upcoming(
 def create_expense(body: ExpenseIn, today: Optional[date] = None, conn: sqlite3.Connection = Conn,
                    uid: int = Me):
     cards.owned_card(conn, uid, body.card_id, body.payment_mode)
+    goals.owned_goal(conn, uid, body.goal_id)
     cur = conn.execute(
         "INSERT INTO expenses (user_id, name, amount, reimbursed, reimbursed_note, due_date, category,"
-        " recurring, anchor_day, payment_mode, card_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        " recurring, anchor_day, payment_mode, card_id, goal_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (uid, body.name, _r(body.amount), _r(body.reimbursed), body.reimbursed_note,
          body.due_date.isoformat(), body.category, body.recurring, body.due_date.day,
-         body.payment_mode, body.card_id),
+         body.payment_mode, body.card_id, body.goal_id),
     )
+    t = _today(today)
+    # Card purchases are charged on their date by charge_due, so `paid` only applies to the rest.
+    if body.paid and not (body.payment_mode == "credit_card" and body.card_id is not None):
+        _pay(conn, uid, _get_row(conn, uid, cur.lastrowid), min(body.due_date, t))
     conn.commit()
-    return _to_out(_get_row(conn, uid, cur.lastrowid), _today(today))
+    return _to_out(_get_row(conn, uid, cur.lastrowid), t)
 
 
 @app.get("/api/expenses/{expense_id}", response_model=ExpenseOut)
@@ -169,11 +186,13 @@ def update_expense(expense_id: int, body: ExpenseIn, today: Optional[date] = Non
                    conn: sqlite3.Connection = Conn, uid: int = Me):
     _get_row(conn, uid, expense_id)
     cards.owned_card(conn, uid, body.card_id, body.payment_mode)
+    goals.owned_goal(conn, uid, body.goal_id)
     conn.execute(
         "UPDATE expenses SET name=?, amount=?, reimbursed=?, reimbursed_note=?, due_date=?, category=?,"
-        " recurring=?, anchor_day=?, payment_mode=?, card_id=? WHERE id=?",
+        " recurring=?, anchor_day=?, payment_mode=?, card_id=?, goal_id=? WHERE id=?",
         (body.name, _r(body.amount), _r(body.reimbursed), body.reimbursed_note, body.due_date.isoformat(),
-         body.category, body.recurring, body.due_date.day, body.payment_mode, body.card_id, expense_id),
+         body.category, body.recurring, body.due_date.day, body.payment_mode, body.card_id, body.goal_id,
+         expense_id),
     )
     conn.commit()
     return _to_out(_get_row(conn, uid, expense_id), _today(today))
@@ -194,20 +213,23 @@ def mark_paid(expense_id: int, today: Optional[date] = None, conn: sqlite3.Conne
     t = _today(today)
     row = _get_row(conn, uid, expense_id)
     if not row["paid"]:
-        conn.execute("UPDATE expenses SET paid=1, paid_on=? WHERE id=?", (t.isoformat(), expense_id))
-        nxt = next_due(date.fromisoformat(row["due_date"]), row["recurring"], row["anchor_day"])
-        has_child = conn.execute(
-            "SELECT 1 FROM expenses WHERE generated_from=?", (expense_id,)
-        ).fetchone()
-        if nxt and not has_child:
-            conn.execute(
-                "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day,"
-                " generated_from, payment_mode, card_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (uid, row["name"], row["amount"], nxt.isoformat(), row["category"],
-                 row["recurring"], row["anchor_day"], expense_id, row["payment_mode"], row["card_id"]),
-            )
+        _pay(conn, uid, row, t)
         conn.commit()
     return _to_out(_get_row(conn, uid, expense_id), t)
+
+
+def _pay(conn: sqlite3.Connection, uid: int, row: sqlite3.Row, paid_on: date) -> None:
+    """Marks an unpaid bill paid and, if it repeats, creates the next one (once)."""
+    conn.execute("UPDATE expenses SET paid=1, paid_on=? WHERE id=?", (paid_on.isoformat(), row["id"]))
+    nxt = next_due(date.fromisoformat(row["due_date"]), row["recurring"], row["anchor_day"])
+    has_child = conn.execute("SELECT 1 FROM expenses WHERE generated_from=?", (row["id"],)).fetchone()
+    if nxt and not has_child:
+        conn.execute(
+            "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day,"
+            " generated_from, payment_mode, card_id, goal_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, row["name"], row["amount"], nxt.isoformat(), row["category"],
+             row["recurring"], row["anchor_day"], row["id"], row["payment_mode"], row["card_id"], row["goal_id"]),
+        )
 
 
 @app.post("/api/expenses/{expense_id}/unpay", response_model=ExpenseOut)
@@ -308,14 +330,14 @@ def summary(
     paid_total = unpaid_total = paid_back = unpaid_back = 0.0
     for r in conn.execute(
         "SELECT paid, COALESCE(SUM(amount),0) AS s, COALESCE(SUM(reimbursed),0) AS back FROM expenses"
-        " WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY paid",
+        " WHERE user_id=? AND due_date >= ? AND due_date < ? AND goal_id IS NULL GROUP BY paid",
         (uid, start.isoformat(), end.isoformat()),
     ):
         if r["paid"]:
             paid_total, paid_back = r["s"], r["back"]
         else:
             unpaid_total, unpaid_back = r["s"], r["back"]
-    projected_total = sum(p.amount for p in _projections(conn, uid, start, end, t))
+    projected_total = sum(p.amount for p in _projections(conn, uid, start, end, t) if p.goal_id is None)
     unpaid_total += projected_total
     for e in cards.emi_items(conn, uid, start, end, t):
         if e.paid:
@@ -384,7 +406,7 @@ def variance(
     for r in conn.execute(
         "SELECT category, SUM(amount - reimbursed) AS actual, SUM(reimbursed) AS back,"
         " SUM(CASE WHEN paid=1 THEN amount - reimbursed ELSE 0 END) AS paid"
-        " FROM expenses WHERE user_id=? AND due_date >= ? AND due_date < ? GROUP BY category",
+        " FROM expenses WHERE user_id=? AND due_date >= ? AND due_date < ? AND goal_id IS NULL GROUP BY category",
         (uid, start.isoformat(), end.isoformat()),
     ):
         key = r["category"].lower()
@@ -393,6 +415,8 @@ def variance(
         slot["paid"] += r["paid"]
         slot["back"] += r["back"]
     for p in _projections(conn, uid, start, end, t):
+        if p.goal_id is not None:
+            continue
         slot = actuals.setdefault(p.category.lower(),
                                   {"name": p.category, "actual": 0.0, "paid": 0.0, "back": 0.0})
         slot["actual"] += p.amount
@@ -440,7 +464,7 @@ def export(conn: sqlite3.Connection = Conn, uid: int = Me):
 
     data = {
         "exported_on": date.today().isoformat(),
-        "expenses": rows("SELECT id, name, amount, reimbursed, reimbursed_note, payment_mode, card_id, due_date, category, recurring, anchor_day, paid, paid_on,"
+        "expenses": rows("SELECT id, name, amount, reimbursed, reimbursed_note, payment_mode, card_id, goal_id, due_date, category, recurring, anchor_day, paid, paid_on,"
                          " generated_from FROM expenses WHERE user_id=? ORDER BY due_date, id"),
         "budgets": rows("SELECT category, monthly_target FROM budgets WHERE user_id=? ORDER BY category"),
         "cards": rows("SELECT id, name, kind, statement_day, due_day FROM cards WHERE user_id=? ORDER BY id"),
@@ -448,6 +472,7 @@ def export(conn: sqlite3.Connection = Conn, uid: int = Me):
                      " WHERE user_id=? ORDER BY id"),
         "card_payments": rows("SELECT card_id, statement_date, amount, paid_on FROM card_payments"
                               " WHERE user_id=? ORDER BY paid_on, id"),
+        "goals": rows("SELECT id, name, budget, target_date FROM goals WHERE user_id=? ORDER BY id"),
         "loans": rows("SELECT id, person, amount, lent_on, due_date, note, remind_every_days, next_remind_on"
                       " FROM loans WHERE user_id=? ORDER BY id"),
         "loan_repayments": rows("SELECT r.loan_id, r.amount, r.paid_on FROM loan_repayments r"

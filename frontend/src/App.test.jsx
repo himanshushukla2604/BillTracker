@@ -35,6 +35,20 @@ function fakeFetch(url, init = {}) {
   if (p === '/api/auth/register') { store.user = { id: 2, email: body.email }; return ok(store.user, 201); }
   if (p === '/api/auth/logout') { store.user = null; return ok(null, 204); }
   if (!store.user) return fail(401, 'Please log in');
+  if (p === '/api/goals' && method === 'GET') return ok(store.goals);
+  if (p === '/api/goals' && method === 'POST') {
+    const g = { id: 70 + store.goals.length, spent: 0, paid: 0, left: body.budget, count: 0, days_to_target: null, ...body };
+    store.goals.push(g);
+    return ok(g, 201);
+  }
+  if (p === '/api/expenses' && method === 'GET' && u.searchParams.has('goal_id')) {
+    return ok(store.expenses.filter((e) => e.goal_id === Number(u.searchParams.get('goal_id'))).map(decorate));
+  }
+  if (p === '/api/expenses' && method === 'GET' && u.searchParams.has('q')) {
+    const q = u.searchParams.get('q').toLowerCase();
+    return ok(store.expenses.filter((e) => `${e.name} ${e.category}`.toLowerCase().includes(q))
+      .sort((a, b) => a.due_date.localeCompare(b.due_date)).map(decorate));
+  }
   if (p === '/api/expenses' && method === 'GET') {
     const month = u.searchParams.get('month');
     return ok([...store.expenses, ...store.projected].filter((e) => e.due_date.startsWith(month)).map(decorate));
@@ -92,6 +106,10 @@ function fakeFetch(url, init = {}) {
   }
   const one = p.match(/^\/api\/expenses\/(\d+)$/);
   if (one && method === 'GET') return ok(decorate(store.expenses.find((x) => x.id === Number(one[1]))));
+  if (one && method === 'DELETE') {
+    store.expenses = store.expenses.filter((x) => x.id !== Number(one[1]));
+    return ok(null, 204);
+  }
   if (one && method === 'PUT') {
     const e = store.expenses.find((x) => x.id === Number(one[1]));
     Object.assign(e, body);
@@ -124,6 +142,7 @@ beforeEach(() => {
     loans: [],
     cards: [],
     cardBills: [],
+    goals: [],
   };
   globalThis.fetch = vi.fn(async (url, init) => fakeFetch(url, init));
 });
@@ -134,13 +153,23 @@ const timeline = () => screen.getByRole('region', { name: 'Upcoming bills' });
 const rowsOf = (el) =>
   [...el.querySelectorAll('li[data-urgency]')].map((li) => [li.querySelector('.truncate').textContent, li.dataset.urgency]);
 
-async function renderApp() {
+const PANEL = { expenses: 'All expenses', bills: 'Upcoming bills' };
+
+/** Renders the app logged in, on the given tab (it opens on the last one used). */
+async function renderApp(tab = 'expenses') {
+  localStorage.setItem('ft-tab', tab);
   render(<App />);
-  await screen.findByRole('region', { name: 'Upcoming bills' });
+  await screen.findByRole('region', { name: PANEL[tab] });
+}
+
+/** Switches to the Bills or Expenses tab. */
+async function openTab(tab) {
+  await userEvent.setup({ advanceTimers: () => {} }).click(screen.getByRole('tab', { name: new RegExp(`^${tab}`) }));
+  await screen.findByRole('region', { name: PANEL[tab.toLowerCase()] });
 }
 
 it('lists upcoming bills chronologically and colour-codes the next 3 days', async () => {
-  await renderApp();
+  await renderApp('bills');
   expect(rowsOf(timeline())).toEqual([
     ['Mobile Recharge', 'overdue'],
     ['Rent', 'urgent'],
@@ -181,6 +210,125 @@ it('lists the month\'s expenses under each category', async () => {
   await user.click(within(food).getByText('2 expenses', { selector: 'summary' }));
   expect(food).toHaveTextContent('3 Nov · Groceries₹1,240');
   expect(food).toHaveTextContent('7 Nov · Dinner out₹900 −₹400 back');
+  // and each one opens for editing from there
+  await user.click(within(food).getByRole('button', { name: 'Edit Dinner out' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Edit expense' });
+  expect(within(dialog).getByLabelText('Expense name')).toHaveValue('Dinner out');
+});
+
+it('searches every month, and edits or deletes from the results', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  store.expenses.push(
+    { id: 7, name: 'Monitor', amount: 13760, due_date: '2026-10-18', category: 'Electronics', paid: true },
+    { id: 8, name: 'Monitor stand', amount: 1500, due_date: '2026-11-02', category: 'Electronics', paid: true },
+  );
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: 'Search expenses' }));
+  let dialog = await screen.findByRole('dialog', { name: 'Search expenses' });
+  await user.type(within(dialog).getByRole('searchbox', { name: 'Search expenses' }), 'moni');
+  const results = await within(dialog).findByRole('list', { name: 'Search results' });
+  // newest first, with the year, from any month
+  expect([...results.querySelectorAll('li')].map((li) => li.querySelector('p').textContent)).toEqual(['Monitor stand', 'Monitor']);
+  expect(results).toHaveTextContent('18 Oct 2026 · Electronics');
+  expect(dialog).toHaveTextContent('2 found · ₹15,260');
+
+  // edit: the search steps aside, then comes back with the same query and the new amount
+  await user.click(within(results).getByRole('button', { name: 'Edit Monitor' }));
+  const form = await screen.findByRole('dialog', { name: 'Edit expense' });
+  await user.clear(within(form).getByLabelText('Amount (₹)'));
+  await user.type(within(form).getByLabelText('Amount (₹)'), '12000');
+  await user.click(within(form).getByRole('button', { name: 'Save changes' }));
+  dialog = await screen.findByRole('dialog', { name: 'Search expenses' });
+  expect(within(dialog).getByRole('searchbox')).toHaveValue('moni');
+  await waitFor(() => expect(dialog).toHaveTextContent('2 found · ₹13,500'));
+
+  // delete asks once more, then the result goes
+  await user.click(within(dialog).getByRole('button', { name: 'Delete Monitor stand' }));
+  await user.click(within(dialog).getByRole('button', { name: 'Confirm delete' }));
+  await waitFor(() => expect(dialog).toHaveTextContent('1 found · ₹12,000'));
+  expect(calls.some((c) => c.method === 'DELETE' && c.path === '/api/expenses/8')).toBe(true);
+});
+
+it('an expense can be deleted from its edit form', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  await renderApp();
+  await user.click(screen.getAllByRole('button', { name: 'Edit Mobile Recharge' })[0]);
+  const form = await screen.findByRole('dialog', { name: 'Edit expense' });
+  await user.click(within(form).getByRole('button', { name: 'Delete' }));
+  await user.click(within(form).getByRole('button', { name: 'Confirm delete' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.some((c) => c.method === 'DELETE' && c.path === '/api/expenses/1')).toBe(true);
+  expect(await screen.findByText('Mobile Recharge deleted')).toBeInTheDocument();
+});
+
+it('shows where the month\'s money went, largest category first, with its expenses', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  await renderApp();
+  const chart = screen.getByRole('list', { name: /^Spending by category/ });
+  expect([...chart.querySelectorAll(':scope > li')].map((li) => li.dataset.category))
+    .toEqual(['Rent', 'Credit Cards', 'Subscriptions', 'Food', 'Utilities']);
+  expect(chart.querySelector('li[data-category="Rent"]')).toHaveTextContent('Rent55%₹22,000');
+  expect(screen.getByRole('img', { name: /Spending by category.*Rent ₹22,000 \(55%\)/ })).toBeInTheDocument();
+  const food = chart.querySelector('li[data-category="Food"]');
+  await user.click(within(food).getByRole('button', { name: /Food/ }));
+  expect(food).toHaveTextContent('3 Nov · Groceries₹1,240');
+  // tapping a slice of the pie opens that category too
+  const pie = screen.getByRole('img', { name: /^Spending by category/ });
+  expect(pie).toHaveTextContent('Total₹39,739');
+  const rentSlice = [...pie.querySelectorAll('circle')].find((c) => c.textContent.startsWith('Rent:'));
+  await user.click(rentSlice);
+  expect(chart.querySelector('li[data-category="Rent"] > button')).toHaveAttribute('aria-expanded', 'true');
+});
+
+it('goal spending counts towards the goal, not the month', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  store.goals = [{ id: 70, name: 'Build house', budget: 2000000, target_date: '2027-12-01', spent: 100000, paid: 100000,
+    left: 1900000, count: 1, days_to_target: 386 }];
+  store.expenses.push({ id: 9, name: 'Iron rods', amount: 100000, due_date: '2026-11-04', category: 'Construction',
+    paid: true, goal_id: 70 });
+  await renderApp();
+  // the month is unchanged: 50,000 - 39,739
+  expect(screen.getByTestId('remaining')).toHaveTextContent('₹10,261');
+  expect(screen.getByRole('list', { name: /^Spending by category/ }).querySelector('li[data-category="Construction"]')).toBeNull();
+  expect(screen.getByText(/1 goal expense not included/)).toBeInTheDocument();
+  const ledgerRow = [...screen.getByRole('region', { name: 'All expenses' }).querySelectorAll('li')]
+    .find((li) => li.textContent.includes('Iron rods'));
+  expect(ledgerRow).toHaveTextContent('Goal · Build house');
+
+  const goals = screen.getByRole('region', { name: 'Goals' });
+  expect(goals).toHaveTextContent('₹19,00,000 left');
+  expect(goals).toHaveTextContent('₹1,00,000 of ₹20,00,000 · by Dec 2027');
+  // where the goal's money went
+  await user.click(within(goals).getByRole('button', { name: /1 expense/ }));
+  expect(await within(goals).findByRole('list', { name: 'Build house by category' })).toHaveTextContent('Construction100%₹1,00,000');
+
+  // adding an expense from the goal tags it
+  await user.click(within(goals).getByRole('button', { name: 'Expense' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  expect(within(dialog).getByLabelText('Towards a goal')).toHaveValue('70');
+  await user.type(within(dialog).getByLabelText('Expense name'), 'Cement');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '40000');
+  await user.type(within(dialog).getByLabelText('Category'), 'Construction');
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/expenses').body).toMatchObject({ name: 'Cement', goal_id: 70 });
+  expect(screen.getByTestId('remaining')).toHaveTextContent('₹10,261');
+});
+
+it('adds a goal', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  await renderApp();
+  const goals = screen.getByRole('region', { name: 'Goals' });
+  await user.click(within(goals).getByRole('button', { name: 'Goal' }));
+  const dialog = await screen.findByRole('dialog', { name: 'New goal' });
+  await user.click(within(dialog).getByRole('button', { name: 'Add goal' }));
+  expect(within(dialog).getByText('Name the goal')).toBeInTheDocument();
+  await user.type(within(dialog).getByLabelText('Goal'), 'Car');
+  await user.type(within(dialog).getByLabelText('Planned spending (₹)'), '8,00,000');
+  await user.click(within(dialog).getByRole('button', { name: 'Add goal' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/goals').body).toEqual({ name: 'Car', budget: 800000, target_date: null });
+  expect(within(goals).getByText('Car')).toBeInTheDocument();
 });
 
 it('updates the remaining budget live while the budget is edited', async () => {
@@ -197,7 +345,7 @@ it('updates the remaining budget live while the budget is edited', async () => {
 
 it('marking a bill paid refreshes the alerts and totals', async () => {
   const user = userEvent.setup();
-  await renderApp();
+  await renderApp('bills');
   await user.click(within(timeline()).getByRole('button', { name: 'Mark Mobile Recharge as paid' }));
   await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('2 bills need attention'));
   expect(calls.some((c) => c.method === 'POST' && c.path === '/api/expenses/1/pay')).toBe(true);
@@ -210,12 +358,13 @@ it('shows projected recurring bills without pay/edit/delete and counts them in n
     id: null, projected: true, projected_from: 2, name: 'Rent', amount: 22000,
     due_date: '2026-12-10', category: 'Rent', paid: false, recurring: 'monthly',
   }];
-  await renderApp();
+  await renderApp('bills');
   const row = timeline().querySelector('li[data-projected]');
   expect(row).toHaveTextContent('Rent');
   expect(row).toHaveTextContent('Projected');
   expect(within(row).queryByRole('button')).toBeNull();
 
+  await openTab('Expenses');
   await user.click(screen.getByRole('button', { name: 'Next month' }));
   const ledger = screen.getByRole('region', { name: 'All expenses' });
   await waitFor(() => expect(ledger.querySelector('li[data-projected]')).toHaveTextContent('Rent'));
@@ -253,12 +402,56 @@ it('validates and submits the add-expense form', async () => {
 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   const post = calls.find((c) => c.method === 'POST' && c.path === '/api/expenses');
+  // dated today, so it is one-time spending that is already paid unless you say otherwise
   expect(post.body).toEqual({
-    name: 'EatClub', amount: 149, due_date: '2026-11-10', category: 'Subscriptions', recurring: 'monthly',
-    payment_mode: null, card_id: null,
+    name: 'EatClub', amount: 149, due_date: '2026-11-10', category: 'Subscriptions', recurring: 'none',
+    payment_mode: null, card_id: null, goal_id: null, paid: true,
   });
   // 50,000 - 39,739 - 149
   await waitFor(() => expect(screen.getByTestId('remaining')).toHaveTextContent('₹10,112'));
+});
+
+it('asks whether a new expense is paid or a bill to pay, following the date until you choose', async () => {
+  const user = userEvent.setup();
+  store.cards = [hdfc()];
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  const status = () => within(dialog).getByRole('group', { name: 'Status' });
+  expect(within(status()).getByRole('radio', { name: 'Paid' })).toBeChecked();
+  expect(within(dialog).getByRole('radio', { name: 'One-time' })).toBeChecked();
+
+  // a future date is a bill to pay
+  const due = within(dialog).getByLabelText('Due date');
+  await user.clear(due);
+  await user.type(due, '2026-11-25');
+  expect(within(status()).getByRole('radio', { name: 'To pay' })).toBeChecked();
+  expect(dialog).toHaveTextContent('shows in Upcoming bills until you mark it paid');
+  // ...unless you say it is already paid, and then changing the date keeps your choice
+  await user.click(within(status()).getByRole('radio', { name: 'Paid' }));
+  await user.clear(due);
+  await user.type(due, '2026-11-28');
+  expect(within(status()).getByRole('radio', { name: 'Paid' })).toBeChecked();
+
+  // a credit card purchase goes on the card's bill, so there is nothing to ask
+  await user.selectOptions(within(dialog).getByLabelText('Paid with'), 'credit_card');
+  expect(within(dialog).queryByRole('group', { name: 'Status' })).toBeNull();
+});
+
+it('a bill to pay is added unpaid and shows in Upcoming bills', async () => {
+  const user = userEvent.setup();
+  await renderApp('bills');
+  // adding from Upcoming bills starts as a bill to pay
+  await user.click(within(timeline()).getByRole('button', { name: 'Add' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  expect(within(dialog).getByRole('radio', { name: 'To pay' })).toBeChecked();
+  await user.type(within(dialog).getByLabelText('Expense name'), 'Water bill');
+  await user.type(within(dialog).getByLabelText('Amount (₹)'), '400');
+  await user.type(within(dialog).getByLabelText('Category'), 'Utilities');
+  await user.click(within(dialog).getByRole('button', { name: 'Add expense' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(calls.find((c) => c.method === 'POST' && c.path === '/api/expenses').body).not.toHaveProperty('paid');
+  await waitFor(() => expect(rowsOf(timeline()).map((r) => r[0])).toContain('Water bill'));
 });
 
 it('asks for a login, then shows only after signing in', async () => {
@@ -278,7 +471,8 @@ it('asks for a login, then shows only after signing in', async () => {
   await user.clear(screen.getByLabelText('Password'));
   await user.type(screen.getByLabelText('Password'), 'correct horse');
   await user.click(await submit());
-  await screen.findByRole('region', { name: 'Upcoming bills' });
+  await screen.findByRole('region', { name: 'All expenses' });
+  await openTab('Bills');
   expect(rowsOf(timeline()).map((r) => r[0])).toContain('Rent');
 });
 
@@ -295,7 +489,7 @@ it('creating an account checks the password length first', async () => {
 
   await user.type(screen.getByLabelText('Password'), '-and-longer');
   await user.click(screen.getAllByRole('button', { name: 'Create account' }).at(-1));
-  await screen.findByRole('region', { name: 'Upcoming bills' });
+  await screen.findByRole('region', { name: 'All expenses' });
   expect(calls.find((c) => c.path === '/api/auth/register').body).toEqual({
     email: 'new@example.com', password: 'short-and-longer' });
 });
@@ -305,13 +499,13 @@ it('logging out returns to the login screen and hides the data', async () => {
   await renderApp();
   await user.click(screen.getByRole('button', { name: 'Log out me@example.com' }));
   expect(await screen.findByLabelText('Password')).toBeInTheDocument();
-  expect(screen.queryByRole('region', { name: 'Upcoming bills' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'All expenses' })).not.toBeInTheDocument();
   expect(store.user).toBeNull();
 });
 
 it('an expired session sends you back to log in', async () => {
   const user = userEvent.setup();
-  await renderApp();
+  await renderApp('bills');
   store.user = null; // the server forgot the session
   await user.click(within(timeline()).getByRole('button', { name: 'Mark Mobile Recharge as paid' }));
   expect(await screen.findByLabelText('Password')).toBeInTheDocument();
@@ -325,6 +519,7 @@ it('money paid back is shown on the bill and not counted against the budget', as
   expect(screen.getByTestId('paid-back')).toHaveTextContent('−₹4,000');
   expect(screen.getByTestId('paid-back-tag')).toHaveTextContent('−₹4,000 paid back · Rahul');
   // the timeline still shows the full card bill as due
+  await openTab('Bills');
   const row = [...timeline().querySelectorAll('li[data-urgency]')].find((li) => li.textContent.includes('HDFC'));
   expect(row).toHaveTextContent('₹14,200');
 });
@@ -357,7 +552,7 @@ it('a brand-new account still gets category suggestions it can click', async () 
   const user = userEvent.setup();
   store.expenses = [];
   store.budgets = [];
-  await renderApp();
+  await renderApp('bills');
   await user.click(screen.getByRole('button', { name: /add expense/i }));
   const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
   const chips = within(dialog).getByRole('group', { name: 'Suggested categories' });
@@ -378,7 +573,7 @@ const loansPanel = () => screen.getByRole('region', { name: 'Money lent' });
 it('reminds you to ask for money back until you say you asked', async () => {
   const user = userEvent.setup();
   store.loans = [loan()];
-  await renderApp();
+  await renderApp('bills');
   expect(screen.getByTestId('loan-reminders')).toHaveTextContent('Ask Rahul for ₹3,000 back');
   expect(document.title).toBe('(4) Bill Tracker');
   expect(loansPanel()).toHaveTextContent('₹3,000 owed to you by 1 person');
@@ -392,7 +587,7 @@ it('reminds you to ask for money back until you say you asked', async () => {
 
 it('lends money with a reminder schedule', async () => {
   const user = userEvent.setup();
-  await renderApp();
+  await renderApp('bills');
   await user.click(within(loansPanel()).getByRole('button', { name: 'Lend' }));
   const dialog = await screen.findByRole('dialog', { name: 'Lend money' });
   await user.click(within(dialog).getByRole('button', { name: 'Save loan' }));
@@ -414,7 +609,7 @@ it('lends money with a reminder schedule', async () => {
 it('records money paid back and closes the loan', async () => {
   const user = userEvent.setup();
   store.loans = [loan({ reminder_due: false })];
-  await renderApp();
+  await renderApp('bills');
   await user.click(within(loansPanel()).getByRole('button', { name: 'Got money back' }));
   const dialog = await screen.findByRole('dialog', { name: 'Money back from Rahul' });
   expect(within(dialog).getByLabelText('Amount received (₹)')).toHaveValue('3000');
@@ -444,7 +639,7 @@ it('shows what you owe each card and pays the bill from the timeline', async () 
   store.cards = [hdfc()];
   store.cardBills = [{ id: null, kind: 'card_bill', name: 'HDFC bill', amount: 4200, due_date: '2026-11-05',
     category: 'Credit card bill', paid: false, projected: false, card_id: 1, statement_date: '2026-10-15' }];
-  await renderApp();
+  await renderApp('bills');
   expect(within(cardsPanel()).getByTestId('card-total')).toHaveTextContent('₹9,000');
   expect(cardsPanel()).toHaveTextContent('EMIs still to come₹4,000');
   expect(cardsPanel()).toHaveTextContent('1 of 3 paid · ends Dec 2026');
@@ -466,7 +661,7 @@ it('a purchase on a card bill can be edited from the bill, even from another mon
   store.cards = [hdfc(), icici];
   store.expenses.push({ id: 41, name: 'Shoes', amount: 3000, due_date: '2026-10-14', category: 'Shopping', paid: true,
     payment_mode: 'credit_card', card_id: 1 });
-  await renderApp();
+  await renderApp('bills');
   const panel = cardsPanel();
   await user.click(within(panel).getAllByText('2 items on this bill', { selector: 'summary' })[0]);
   // EMI instalments are edited from the EMI list, so only purchases get a button here
@@ -506,7 +701,7 @@ it('debit cards are listed and can be picked as the card a payment came from', a
   const sbi = { id: 2, name: 'SBI Savings', kind: 'debit', statement_day: null, due_day: null, due_now: 0,
     unpaid_statements: [], current_statement: null, charged_this_cycle: 0, emi_remaining: 0, total_owed: 0, emis: [] };
   store.cards = [hdfc(), sbi];
-  await renderApp();
+  await renderApp('bills');
   expect(within(cardsPanel()).getByText('Debit cards')).toBeInTheDocument();
   expect(cardsPanel().querySelector('[data-card="SBI Savings"]')).not.toBeNull();
   await user.click(screen.getByRole('button', { name: /add expense/i }));
@@ -543,4 +738,20 @@ it('shows a helpful message when the API is down', async () => {
   globalThis.fetch = vi.fn(async () => { throw new TypeError('network'); });
   render(<App />);
   expect(await screen.findByText(/Cannot reach the API/)).toBeInTheDocument();
+});
+
+it('keeps bills and expenses on separate tabs, and remembers the one you used', async () => {
+  await renderApp();
+  expect(screen.getByRole('tab', { name: 'Expenses' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.queryByRole('region', { name: 'Upcoming bills' })).not.toBeInTheDocument();
+  // the Bills tab shows how many need attention: 1 overdue + 2 due within 3 days
+  expect(screen.getByRole('tab', { name: /^Bills/ })).toHaveTextContent('Bills3');
+  await openTab('Bills');
+  expect(screen.queryByRole('region', { name: 'All expenses' })).not.toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Cards' })).toBeInTheDocument();
+  expect(localStorage.getItem('ft-tab')).toBe('bills');
+  // adding from the Bills tab starts as a bill to pay
+  await userEvent.setup().click(screen.getByRole('button', { name: /add expense/i }));
+  const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
+  expect(within(dialog).getByRole('radio', { name: 'To pay' })).toBeChecked();
 });

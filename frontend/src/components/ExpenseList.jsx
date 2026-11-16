@@ -10,7 +10,7 @@ const TABS = [
   ['paid', 'Paid'],
 ];
 
-export default function ExpenseList({ expenses, cards = [], monthLabel, onPay, onUnpay, onEdit, onDelete, className = '' }) {
+export default function ExpenseList({ expenses, cards = [], goals = [], monthLabel, onPay, onUnpay, onEdit, onDelete, className = '' }) {
   const [tab, setTab] = useState('all');
   const [confirmId, setConfirmId] = useState(null);
 
@@ -84,6 +84,12 @@ export default function ExpenseList({ expenses, cards = [], monthLabel, onPay, o
                       {e.projected && <span title={PROJECTED_HINT}>Projected</span>}
                       {e.kind === 'emi' && <span className="rounded-full bg-violet-100 px-2 py-0.5 font-medium text-violet-800 dark:bg-violet-900/50 dark:text-violet-200">EMI</span>}
                       {paidWith(e, cards) && <span data-testid="paid-with">{paidWith(e, cards)}</span>}
+                      {e.goal_id != null && (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                          title="Counts towards this goal, not your monthly budget">
+                          Goal · {goals.find((g) => g.id === e.goal_id)?.name ?? 'goal'}
+                        </span>
+                      )}
                       {paidBackText(e, money) && (
                         <span className="num text-sky-700 dark:text-sky-400" data-testid="paid-back-tag">{paidBackText(e, money)}</span>
                       )}

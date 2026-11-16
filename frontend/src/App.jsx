@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Download, LogOut, Moon, Plus, Sun, CheckCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, LogOut, Moon, Plus, Search, Sun, CheckCheck } from 'lucide-react';
 import { api } from './lib/api';
-import { ALERT_DAYS, computeVariance, summarize } from './lib/calc';
+import { ALERT_DAYS, computeVariance, isGoal, summarize } from './lib/calc';
 import { daysInMonth, localISO, money, monthLabel, parseISO, shiftMonth } from './lib/format';
 import { withDefaults } from './lib/categories';
 import { useTheme } from './lib/theme';
@@ -11,13 +11,25 @@ import BudgetsModal from './components/BudgetsModal';
 import CardsPanel from './components/CardsPanel';
 import ExpenseForm from './components/ExpenseForm';
 import ExpenseList from './components/ExpenseList';
+import GoalsPanel from './components/GoalsPanel';
+import SpendingChart from './components/SpendingChart';
+import SearchModal from './components/SearchModal';
 import LoansPanel from './components/LoansPanel';
 import SummaryWidget from './components/SummaryWidget';
 import Toast from './components/Toast';
 import UpcomingTimeline from './components/UpcomingTimeline';
 import VarianceModule from './components/VarianceModule';
 
-const EMPTY = { expenses: [], upcoming: [], budgets: [], categories: [], loans: [], cards: [] };
+const TABS = [
+  ['expenses', 'Expenses'],
+  ['bills', 'Bills'],
+];
+const TAB_KEY = 'ft-tab';
+const savedTab = () => {
+  try { return localStorage.getItem(TAB_KEY) === 'bills' ? 'bills' : 'expenses'; } catch { return 'expenses'; }
+};
+
+const EMPTY = { expenses: [], upcoming: [], budgets: [], categories: [], loans: [], cards: [], goals: [] };
 
 /** Everything sits behind a login; each account only ever sees its own data. */
 export default function App() {
@@ -53,7 +65,13 @@ function Dashboard({ user, onLogout, onSessionLost }) {
   const [totalBudget, setTotalBudget] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState(null); // null | { expense?: Expense }
+  const [form, setForm] = useState(null); // null | { expense?, bill?: true (from Upcoming bills), goalId? (from a goal) }
+  const [tab, setTab] = useState(savedTab);
+  const chooseTab = (key) => {
+    setTab(key);
+    try { localStorage.setItem(TAB_KEY, key); } catch { /* private mode: just not remembered */ }
+  };
+  const [search, setSearch] = useState(null); // null when closed, else the query typed so far
   const [showTargets, setShowTargets] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -62,11 +80,11 @@ function Dashboard({ user, onLogout, onSessionLost }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [expenses, upcoming, budgets, settings, categories, loans, cards] = await Promise.all([
+      const [expenses, upcoming, budgets, settings, categories, loans, cards, goals] = await Promise.all([
         api.expenses(month), api.upcoming(Math.max(days, 7)), api.budgets(), api.settings(), api.categories(),
-        api.loans(), api.cards(),
+        api.loans(), api.cards(), api.goals(),
       ]);
-      setData({ expenses, upcoming, budgets, categories, loans, cards });
+      setData({ expenses, upcoming, budgets, categories, loans, cards, goals });
       if (!budgetDirty.current) setTotalBudget(settings.total_budget);
       setError(null);
     } catch (e) {
@@ -84,6 +102,8 @@ function Dashboard({ user, onLogout, onSessionLost }) {
   const categoryOptions = useMemo(() => withDefaults(data.categories), [data.categories]);
   const summary = useMemo(() => summarize(data.expenses, totalBudget), [data.expenses, totalBudget]);
   const variance = useMemo(() => computeVariance(data.expenses, data.budgets), [data.expenses, data.budgets]);
+  const monthSpend = useMemo(() => data.expenses.filter((e) => !isGoal(e)), [data.expenses]);
+  const goalSpend = data.expenses.length - monthSpend.length;
 
   const overdue = useMemo(() => data.upcoming.filter((i) => i.urgency === 'overdue'), [data.upcoming]);
   const dueSoon = useMemo(
@@ -149,6 +169,19 @@ function Dashboard({ user, onLogout, onSessionLost }) {
       undo: undoId && (async () => { await run(() => api.undoRepay(loan.id, undoId), null); }),
     });
   };
+  const saveGoal = async (payload, id) => {
+    if (id) await api.updateGoal(id, payload);
+    else await api.createGoal(payload);
+    await refresh();
+    setToast({ msg: id ? 'Goal updated' : `${payload.name} goal added` });
+  };
+  const goalActions = {
+    onSave: saveGoal,
+    onDelete: (g) => run(() => api.removeGoal(g.id), `${g.name} goal deleted`),
+    onAddExpense: (g) => setForm({ goalId: g.id }),
+    onEditExpense: (expense) => setForm({ expense }),
+  };
+
   const loanActions = {
     onSave: saveLoan,
     onRepay: repay,
@@ -230,7 +263,10 @@ function Dashboard({ user, onLogout, onSessionLost }) {
           {!isCurrentMonth && (
             <button className="btn-outline" onClick={() => setMonth(currentMonth)}>This month</button>
           )}
-          <button className="btn-primary" onClick={() => setForm({})}>
+          <button className="btn-outline p-2" onClick={() => setSearch('')} aria-label="Search expenses" title="Search all months">
+            <Search className="h-4 w-4" />
+          </button>
+          <button className="btn-primary" onClick={() => setForm(tab === 'bills' ? { bill: true } : {})}>
             <Plus className="h-4 w-4" /> <span className="hidden sm:inline">Add expense</span><span className="sm:hidden">Add</span>
           </button>
           <a
@@ -273,57 +309,124 @@ function Dashboard({ user, onLogout, onSessionLost }) {
       ) : (
         // On phones the wrappers dissolve (display: contents) so `order-*` interleaves the cards:
         // summary → timeline → variance → ledger. From lg up they become two real columns.
-        <main className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
-          <div className="contents lg:flex lg:flex-col lg:gap-5">
-            <UpcomingTimeline
-              className="order-2"
-              items={data.upcoming}
-              days={days}
-              onDaysChange={setDays}
-              todayISO={todayISO}
-              onPay={pay}
-              onEdit={(expense) => setForm({ expense })}
-              onAdd={() => setForm({})}
-            />
-            <ExpenseList
-              className="order-4"
-              expenses={data.expenses}
-              cards={data.cards}
-              monthLabel={label}
-              onPay={pay}
-              onUnpay={unpay}
-              onEdit={(expense) => setForm({ expense })}
-              onDelete={remove}
-            />
+        <>
+          <div role="tablist" aria-label="Sections" className="mt-5 grid grid-cols-2 rounded-xl border border-stone-300 p-1 sm:inline-grid sm:w-80 dark:border-neutral-700">
+            {TABS.map(([key, name]) => (
+              <button
+                key={key}
+                role="tab"
+                id={`tab-${key}`}
+                aria-controls={`panel-${key}`}
+                aria-selected={tab === key}
+                onClick={() => chooseTab(key)}
+                className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                  tab === key
+                    ? 'bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900'
+                    : 'text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-neutral-800'
+                }`}
+              >
+                {name}
+                {key === 'bills' && overdue.length + dueSoon.length > 0 && (
+                  <span className="num rounded-full bg-rose-600 px-1.5 text-[11px] leading-5 text-white"
+                    aria-label={`${overdue.length + dueSoon.length} due soon or overdue`}>
+                    {overdue.length + dueSoon.length}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
-          <div className="contents lg:flex lg:flex-col lg:gap-5">
-            <SummaryWidget
-              className="order-1"
-              summary={summary}
-              monthLabel={label}
-              perDay={perDay}
-              daysLeft={daysLeft}
-              onBudgetChange={onBudgetChange}
-            />
-            <VarianceModule
-              className="order-3"
-              variance={variance}
-              monthLabel={label}
-              onEditTargets={() => setShowTargets(true)}
-            />
-            <CardsPanel className="order-5" cards={data.cards} categories={categoryOptions} todayISO={todayISO} {...cardActions} />
-            <LoansPanel className="order-6" loans={data.loans} todayISO={todayISO} {...loanActions} />
-          </div>
-        </main>
+
+          {tab === 'bills' ? (
+            // Bills: what you have to pay, card bills, and money owed to you.
+            <main id="panel-bills" role="tabpanel" aria-labelledby="tab-bills"
+              className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
+              <UpcomingTimeline
+                items={data.upcoming}
+                days={days}
+                onDaysChange={setDays}
+                todayISO={todayISO}
+                onPay={pay}
+                onEdit={(expense) => setForm({ expense })}
+                onAdd={() => setForm({ bill: true })}
+              />
+              <div className="flex flex-col gap-5">
+                <CardsPanel cards={data.cards} categories={categoryOptions} todayISO={todayISO} {...cardActions} />
+                <LoansPanel loans={data.loans} todayISO={todayISO} {...loanActions} />
+              </div>
+            </main>
+          ) : (
+            // Expenses: the month's budget, where it went, and every expense; goals kept apart.
+            // On phones the wrappers dissolve (display: contents) so `order-*` interleaves the cards:
+            // budget → chart → variance → ledger → goals. From lg up they become two real columns.
+            <main id="panel-expenses" role="tabpanel" aria-labelledby="tab-expenses"
+              className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
+              <div className="contents lg:flex lg:flex-col lg:gap-5">
+                <ExpenseList
+                  className="order-4"
+                  expenses={data.expenses}
+                  cards={data.cards}
+                  goals={data.goals}
+                  monthLabel={label}
+                  onPay={pay}
+                  onUnpay={unpay}
+                  onEdit={(expense) => setForm({ expense })}
+                  onDelete={remove}
+                />
+              </div>
+              <div className="contents lg:flex lg:flex-col lg:gap-5">
+                <SummaryWidget
+                  className="order-1"
+                  summary={summary}
+                  monthLabel={label}
+                  perDay={perDay}
+                  daysLeft={daysLeft}
+                  onBudgetChange={onBudgetChange}
+                />
+                <section className="card order-2 p-5" aria-labelledby="spend-h">
+                  <h2 id="spend-h" className="text-base font-semibold">Where your money went</h2>
+                  <p className="mb-3 text-xs text-stone-500 dark:text-stone-400">
+                    Your share by category · {label}
+                    {goalSpend > 0 && ` · ${goalSpend} goal expense${goalSpend === 1 ? '' : 's'} not included`}
+                  </p>
+                  <SpendingChart expenses={monthSpend} onEdit={(expense) => setForm({ expense })}
+                    label={`Spending by category, ${label}`} emptyText="Nothing spent this month yet." />
+                </section>
+                <VarianceModule
+                  className="order-3"
+                  variance={variance}
+                  monthLabel={label}
+                  onEdit={(expense) => setForm({ expense })}
+                  onEditTargets={() => setShowTargets(true)}
+                />
+                <GoalsPanel className="order-5" goals={data.goals} {...goalActions} />
+              </div>
+            </main>
+          )}
+        </>
       )}
 
+      {/* Search steps aside while an expense from it is being edited, then comes back with its query. */}
+      {search != null && !form && (
+        <SearchModal
+          query={search}
+          onQueryChange={setSearch}
+          cards={data.cards}
+          onEdit={(expense) => setForm({ expense })}
+          onDelete={remove}
+          onClose={() => setSearch(null)}
+        />
+      )}
       {form && (
         <ExpenseForm
           expense={form.expense}
+          bill={form.bill}
+          goalId={form.goalId}
+          goals={data.goals}
           categories={categoryOptions}
           cards={data.cards}
           todayISO={todayISO}
           onSubmit={saveExpense}
+          onDelete={(e) => { setForm(null); remove(e); }}
           onClose={() => setForm(null)}
         />
       )}

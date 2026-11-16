@@ -10,15 +10,26 @@ const RECURRING = [
   ['quarterly', 'Quarterly'],
   ['yearly', 'Yearly'],
 ];
+const STATUS = [
+  ['paid', 'Paid'],
+  ['unpaid', 'To pay'],
+];
+const CHOICE = `inline-block rounded-lg border border-stone-300 px-3 py-1.5 text-sm text-stone-700 transition-colors
+  hover:bg-stone-100 peer-checked:border-emerald-600 peer-checked:bg-emerald-50 peer-checked:font-medium peer-checked:text-emerald-800
+  peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-emerald-500
+  dark:border-neutral-700 dark:text-stone-300 dark:hover:bg-neutral-800
+  dark:peer-checked:border-emerald-500 dark:peer-checked:bg-emerald-950 dark:peer-checked:text-emerald-200`;
 
-export default function ExpenseForm({ expense, categories, cards = [], todayISO, onSubmit, onClose }) {
+export default function ExpenseForm({ expense, bill = false, goalId = null, categories, cards = [], goals = [], todayISO, onSubmit, onDelete, onClose }) {
   const editing = Boolean(expense);
   const [f, setF] = useState({
     name: expense?.name ?? '',
     amount: expense ? String(expense.amount) : '',
     due_date: expense?.due_date ?? todayISO,
     category: expense?.category ?? '',
-    recurring: expense?.recurring ?? 'monthly',
+    recurring: expense?.recurring ?? 'none',
+    goal_id: expense ? (expense.goal_id != null ? String(expense.goal_id) : '') : goalId != null ? String(goalId) : '',
+    status: bill ? 'unpaid' : null, // 'paid' | 'unpaid' once chosen; until then it follows the date
     reimbursed: expense?.reimbursed ? String(expense.reimbursed) : '',
     reimbursed_note: expense?.reimbursed_note ?? '',
     payment_mode: expense?.payment_mode ?? '',
@@ -30,10 +41,14 @@ export default function ExpenseForm({ expense, categories, cards = [], todayISO,
   const cardId = f.card_id && choices.some((c) => String(c.id) === f.card_id)
     ? f.card_id
     : kind === 'credit' && choices[0] ? String(choices[0].id) : '';
+  // Spending already done (today or earlier) is paid; a future date is a bill still to pay.
+  const status = f.status ?? (f.due_date && f.due_date <= todayISO ? 'paid' : 'unpaid');
+  const askStatus = !editing && kind !== 'credit';
   const [showBack, setShowBack] = useState(Boolean(expense?.reimbursed));
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const nameRef = useRef(null);
 
   useEffect(() => { nameRef.current?.focus(); }, []);
@@ -65,6 +80,8 @@ export default function ExpenseForm({ expense, categories, cards = [], todayISO,
           ...(reimbursed > 0 ? { reimbursed, reimbursed_note: f.reimbursed_note.trim() || null } : {}),
           payment_mode: f.payment_mode || null,
           card_id: kind && cardId ? Number(cardId) : null,
+          goal_id: f.goal_id ? Number(f.goal_id) : null,
+          ...(askStatus && status === 'paid' ? { paid: true } : {}),
         },
         expense?.id,
       );
@@ -193,6 +210,41 @@ export default function ExpenseForm({ expense, categories, cards = [], todayISO,
           </p>
         )}
 
+        {goals.length > 0 && (
+          <div>
+            <label className="label" htmlFor="f-goal">Towards a goal</label>
+            <select id="f-goal" className="input" value={f.goal_id} onChange={set('goal_id')}>
+              <option value="">No, monthly spending</option>
+              {goals.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            {f.goal_id && (
+              <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+                Counts towards the goal and stays out of your monthly budget.
+              </p>
+            )}
+          </div>
+        )}
+
+        {askStatus && (
+          <fieldset>
+            <legend className="label">Status</legend>
+            <div className="flex flex-wrap gap-2">
+              {STATUS.map(([value, label]) => (
+                <label key={value} className="cursor-pointer">
+                  <input type="radio" name="status" value={value} checked={status === value}
+                    onChange={set('status')} className="peer sr-only" />
+                  <span className={CHOICE}>{label}</span>
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-stone-500 dark:text-stone-400">
+              {status === 'paid'
+                ? 'Already spent: counted as paid, nothing to mark later.'
+                : 'A bill still to pay: it shows in Upcoming bills until you mark it paid.'}
+            </p>
+          </fieldset>
+        )}
+
         <fieldset>
           <legend className="label">Repeats</legend>
           <div className="flex flex-wrap gap-2">
@@ -200,19 +252,13 @@ export default function ExpenseForm({ expense, categories, cards = [], todayISO,
               <label key={value} className="cursor-pointer">
                 <input type="radio" name="recurring" value={value} checked={f.recurring === value}
                   onChange={set('recurring')} className="peer sr-only" />
-                <span className="inline-block rounded-lg border border-stone-300 px-3 py-1.5 text-sm text-stone-700 transition-colors
-                  hover:bg-stone-100 peer-checked:border-emerald-600 peer-checked:bg-emerald-50 peer-checked:font-medium peer-checked:text-emerald-800
-                  peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-emerald-500
-                  dark:border-neutral-700 dark:text-stone-300 dark:hover:bg-neutral-800
-                  dark:peer-checked:border-emerald-500 dark:peer-checked:bg-emerald-950 dark:peer-checked:text-emerald-200">
-                  {label}
-                </span>
+                <span className={CHOICE}>{label}</span>
               </label>
             ))}
           </div>
           {f.recurring !== 'none' && (
             <p className="mt-2 text-xs text-stone-500 dark:text-stone-400">
-              When you mark it paid, the next {f.recurring === 'weekly' ? 'week' : f.recurring.replace('ly', '')}'s bill is created automatically.
+              {askStatus && status === 'paid' ? 'The' : 'When you mark it paid, the'} next {f.recurring === 'weekly' ? 'week' : f.recurring.replace('ly', '')}&apos;s bill is created automatically.
             </p>
           )}
         </fieldset>
@@ -223,7 +269,18 @@ export default function ExpenseForm({ expense, categories, cards = [], todayISO,
           </p>
         )}
 
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex items-center justify-end gap-2 pt-2">
+          {editing && onDelete && (
+            confirmDelete ? (
+              <button type="button" className="btn mr-auto bg-rose-600 text-white hover:bg-rose-700" onClick={() => onDelete(expense)}>
+                Confirm delete
+              </button>
+            ) : (
+              <button type="button" className="btn-ghost mr-auto text-rose-600 dark:text-rose-400" onClick={() => setConfirmDelete(true)}>
+                Delete
+              </button>
+            )
+          )}
           <button type="button" className="btn-outline" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? 'Saving…' : editing ? 'Save changes' : 'Add expense'}

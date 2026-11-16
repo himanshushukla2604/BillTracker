@@ -20,6 +20,8 @@ class ExpenseIn(BaseModel):
     reimbursed_note: Optional[str] = Field(None, max_length=120)
     payment_mode: Optional[PaymentMode] = None
     card_id: Optional[int] = None  # required for credit_card; optional for debit_card (which one)
+    paid: bool = False  # on create only: already paid, so there is nothing to mark later
+    goal_id: Optional[int] = None  # spending towards a goal: kept out of the monthly budget
 
     @field_validator("name", "category")
     @classmethod
@@ -68,6 +70,7 @@ class ExpenseOut(BaseModel):
     card_id: Optional[int] = None
     statement_date: Optional[date] = None  # card bills: the statement being paid
     emi_id: Optional[int] = None  # EMI instalments: which EMI
+    goal_id: Optional[int] = None  # spending towards a goal, not counted in the month
 
 
 class SettingsIn(BaseModel):

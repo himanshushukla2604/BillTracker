@@ -39,6 +39,7 @@ export const api = {
   settings: () => req('GET', '/settings'),
   categories: () => req('GET', '/categories'),
   expense: (id) => req('GET', `/expenses/${id}`),
+  search: (q) => req('GET', '/expenses', { params: { q } }),
   create: (body) => req('POST', '/expenses', { body }),
   update: (id, body) => req('PUT', `/expenses/${id}`, { body }),
   remove: (id) => req('DELETE', `/expenses/${id}`),
@@ -66,4 +67,10 @@ export const api = {
   createEmi: (cardId, body) => req('POST', `/cards/${cardId}/emis`, { body }),
   updateEmi: (id, body) => req('PUT', `/emis/${id}`, { body }),
   removeEmi: (id) => req('DELETE', `/emis/${id}`),
+
+  goals: () => req('GET', '/goals'),
+  createGoal: (body) => req('POST', '/goals', { body }),
+  updateGoal: (id, body) => req('PUT', `/goals/${id}`, { body }),
+  removeGoal: (id) => req('DELETE', `/goals/${id}`),
+  goalExpenses: (id) => req('GET', '/expenses', { params: { goal_id: id } }),
 };

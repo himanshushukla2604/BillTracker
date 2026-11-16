@@ -7,6 +7,9 @@ const round2 = (n) => Math.round(n * 100) / 100;
 /** What you spent yourself on a bill: the amount less anything someone paid back to you. */
 export const ownShare = (e) => e.amount - (e.reimbursed || 0);
 
+/** Spending towards a goal (a house, a car) is kept out of the month's budget and targets. */
+export const isGoal = (e) => e.goal_id != null;
+
 /**
  * Remaining budget = total budget - your own spend: everything dated in the month (paid, still
  * to pay, projected) less what others paid back. `paid` / `unpaid` stay full bill amounts.
@@ -18,6 +21,7 @@ export function summarize(expenses, totalBudget) {
   let paidBack = 0;
   let unpaidBack = 0;
   for (const e of expenses) {
+    if (isGoal(e)) continue;
     const back = e.reimbursed || 0;
     if (e.paid) { paid += e.amount; paidBack += back; }
     else { unpaid += e.amount; unpaidBack += back; }
@@ -49,6 +53,7 @@ export function computeVariance(expenses, budgets) {
     map.set(b.category.toLowerCase(), { category: b.category, target: b.monthly_target, actual: 0, paid: 0, reimbursed: 0, items: [] });
   }
   for (const e of expenses) {
+    if (isGoal(e)) continue;
     const key = e.category.toLowerCase();
     if (!map.has(key)) map.set(key, { category: e.category, target: null, actual: 0, paid: 0, reimbursed: 0, items: [] });
     const row = map.get(key);
@@ -79,4 +84,27 @@ export function computeVariance(expenses, budgets) {
     totalVariance: round2(totalTarget - totalActual),
     unbudgeted: round2(rows.filter((r) => r.target == null).reduce((s, r) => s + r.actual, 0)),
   };
+}
+
+/** Your own spend per category, largest first, each with its expenses by date (for a chart).
+ *  Categories match in any case; ones you got fully paid back for are left out. */
+export function spendByCategory(expenses) {
+  const map = new Map();
+  for (const e of expenses) {
+    const key = e.category.toLowerCase();
+    if (!map.has(key)) map.set(key, { category: e.category, amount: 0, items: [] });
+    const row = map.get(key);
+    row.amount += ownShare(e);
+    row.items.push(e);
+  }
+  const rows = [...map.values()]
+    .map((r) => ({
+      ...r,
+      amount: round2(r.amount),
+      items: r.items.sort((a, b) => a.due_date.localeCompare(b.due_date) || a.name.localeCompare(b.name)),
+    }))
+    .filter((r) => r.amount > 0)
+    .sort((a, b) => b.amount - a.amount || a.category.localeCompare(b.category));
+  const total = round2(rows.reduce((s, r) => s + r.amount, 0));
+  return { rows, total };
 }

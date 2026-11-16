@@ -917,3 +917,106 @@ def test_debit_cards_are_named_but_have_no_bill(client):
     assert renamed["name"] == "SBI Savings"
     kinds = [(c["name"], c["kind"]) for c in client.get("/api/cards", params=T).json()]
     assert kinds == [("HDFC", "credit"), ("SBI Savings", "debit")]
+
+
+def test_search_finds_expenses_in_any_month_by_name_category_payer_or_card(client):
+    icici = add_card(client, "ICICI Rubix")
+    charge(client, icici, "Monitor", 13760, "2026-10-18", category="Electronics")
+    mk(client, name="Rent", amount=22000, due=date(2026, 11, 10), category="Housing", recurring="monthly")
+    shared = mk(client, name="Dinner", amount=900, due=date(2026, 9, 2), category="Food")
+    client.put(f"/api/expenses/{shared['id']}", params=T, json={
+        "name": "Dinner", "amount": 900, "due_date": "2026-09-02", "category": "Food", "recurring": "none",
+        "reimbursed": 400, "reimbursed_note": "Rahul"})
+
+    def names(q):
+        return [e["name"] for e in client.get("/api/expenses", params={"q": q, **T}).json()]
+
+    assert names("moni") == ["Monitor"]          # name, a month other than the current one
+    assert names("housing") == ["Rent"]          # category, any case
+    assert names("rahul") == ["Dinner"]          # who paid back
+    assert names("rubix") == ["Monitor"]         # card name
+    assert names("50%") == [] and names("_") == []  # wildcards are matched literally
+    # stored bills only: no projected repeats or EMI instalments, so every result can be edited
+    assert names("rent") == ["Rent"]
+
+
+def test_an_expense_can_be_added_already_paid(client):
+    def add(**kw):
+        body = {"name": "Lunch", "amount": 250, "due_date": "2026-10-28", "category": "Food", **kw}
+        r = client.post("/api/expenses", params=T, json=body)
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    # spent earlier: paid on the day it was spent, and not waiting to be paid
+    lunch = add(paid=True)
+    assert (lunch["paid"], lunch["paid_on"]) == (True, "2026-10-28")
+    assert "Lunch" not in [u["name"] for u in client.get("/api/upcoming", params=T).json()]
+    # a bill to pay later is still the default
+    assert add(name="Electricity")["paid"] is False
+    # paid ahead for a future date counts as paid today
+    assert add(name="Gym", due_date="2026-12-01", paid=True)["paid_on"] == T["today"]
+    # a repeating one paid when added schedules the next, like marking it paid would
+    add(name="Netflix", due_date="2026-11-05", recurring="monthly", paid=True)
+    nov = client.get("/api/expenses", params={"month": "2026-12", **T}).json()
+    assert [(e["name"], e["paid"], e["projected"]) for e in nov if e["name"] == "Netflix"] == [("Netflix", False, False)]
+
+
+def test_goal_spending_stays_out_of_the_monthly_budget(client):
+    client.put("/api/settings", json={"total_budget": 50000})
+    client.put("/api/budgets/Construction", json={"monthly_target": 1000})
+    house = client.post("/api/goals", params=T, json={"name": "Build house", "budget": 2000000,
+                                                      "target_date": "2027-12-31"})
+    assert house.status_code == 201, house.text
+    house = house.json()
+    groceries = mk(client, name="Groceries", amount=3000, due=date(2026, 11, 5), category="Food")
+    rods = client.post("/api/expenses", params=T, json={
+        "name": "Iron rods", "amount": 100000, "due_date": "2026-11-05", "category": "Construction",
+        "goal_id": house["id"], "paid": True})
+    assert rods.status_code == 201 and rods.json()["goal_id"] == house["id"]
+    # an unpaid goal bill is still a bill to pay
+    cement = client.post("/api/expenses", params=T, json={
+        "name": "Cement", "amount": 40000, "due_date": "2026-11-20", "category": "Construction",
+        "goal_id": house["id"]}).json()
+
+    s = client.get("/api/summary", params={"month": "2026-11", **T}).json()
+    assert s["own_spend"] == 3000 and s["remaining"] == 47000  # only the groceries count
+    rows = client.get("/api/variance", params={"month": "2026-11", **T}).json()["rows"]
+    assert {r["category"]: r["actual"] for r in rows} == {"Construction": 0, "Food": 3000}
+    assert "Cement" in [u["name"] for u in client.get("/api/upcoming", params=T).json()]
+
+    g = client.get("/api/goals", params=T).json()
+    assert [(x["name"], x["spent"], x["paid"], x["left"], x["count"]) for x in g] == [
+        ("Build house", 140000, 100000, 1860000, 2)]
+    tagged = client.get("/api/expenses", params={"goal_id": house["id"], **T}).json()
+    assert [e["name"] for e in tagged] == ["Iron rods", "Cement"]
+
+    # someone else's goal cannot be used
+    assert client.post("/api/expenses", params=T, json={
+        "name": "x", "amount": 1, "due_date": "2026-11-05", "category": "X", "goal_id": 999}).status_code == 422
+    # untagging moves it back into the month
+    client.put(f"/api/expenses/{groceries['id']}", params=T, json={
+        "name": "Groceries", "amount": 3000, "due_date": "2026-11-05", "category": "Food", "recurring": "none",
+        "goal_id": house["id"]})
+    assert client.get("/api/summary", params={"month": "2026-11", **T}).json()["own_spend"] == 0
+    # deleting the goal keeps its expenses, which count in their month again
+    assert client.delete(f"/api/goals/{house['id']}").status_code == 204
+    assert client.get("/api/goals", params=T).json() == []
+    assert client.get("/api/summary", params={"month": "2026-11", **T}).json()["own_spend"] == 143000
+    assert client.get(f"/api/expenses/{cement['id']}", params=T).json()["goal_id"] is None
+    assert "goals" in client.get("/api/export").json()
+
+
+def test_goals_column_is_added_to_an_older_database(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    monkeypatch.setenv("FT_DB", str(path))
+    from app import db as dbmod
+    dbmod.init_db()
+    with sqlite3.connect(path) as c:  # pretend it is a v4 file: no goal_id column, no goals table
+        c.execute("DROP TABLE goals")
+        c.execute("ALTER TABLE expenses DROP COLUMN goal_id")
+        c.execute("PRAGMA user_version = 4")
+    dbmod.init_db()
+    with sqlite3.connect(path) as c:
+        assert "goal_id" in {r[1] for r in c.execute("PRAGMA table_info(expenses)")}
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='goals'").fetchone()
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 5

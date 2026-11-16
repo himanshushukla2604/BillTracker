@@ -68,9 +68,9 @@ def charge_due(conn: sqlite3.Connection, uid: int, today: date) -> None:
             if nxt and not has_child:
                 conn.execute(
                     "INSERT INTO expenses (user_id, name, amount, due_date, category, recurring, anchor_day,"
-                    " generated_from, payment_mode, card_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    " generated_from, payment_mode, card_id, goal_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (uid, row["name"], row["amount"], nxt.isoformat(), row["category"], row["recurring"],
-                     row["anchor_day"], row["id"], row["payment_mode"], row["card_id"]),
+                     row["anchor_day"], row["id"], row["payment_mode"], row["card_id"], row["goal_id"]),
                 )
     conn.commit()
 
