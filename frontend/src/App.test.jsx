@@ -34,6 +34,17 @@ function fakeFetch(url, init = {}) {
   }
   if (p === '/api/auth/register') { store.user = { id: 2, email: body.email }; return ok(store.user, 201); }
   if (p === '/api/auth/logout') { store.user = null; return ok(null, 204); }
+  if (p === '/api/auth/password') {
+    if (!store.user) return fail(401, 'Please log in');
+    if (body.current_password !== 'correct horse') return fail(401, 'That is not your current password');
+    return ok(null, 204);
+  }
+  if (p === '/api/auth/delete-account') {
+    if (!store.user) return fail(401, 'Please log in');
+    if (body.password !== 'correct horse') return fail(401, 'That is not your current password');
+    store.user = null;
+    return ok(null, 204);
+  }
   if (!store.user) return fail(401, 'Please log in');
   if (p === '/api/goals' && method === 'GET') return ok(store.goals);
   if (p === '/api/goals' && method === 'POST') {
@@ -754,4 +765,55 @@ it('keeps bills and expenses on separate tabs, and remembers the one you used', 
   await userEvent.setup().click(screen.getByRole('button', { name: /add expense/i }));
   const dialog = await screen.findByRole('dialog', { name: 'Add expense' });
   expect(within(dialog).getByRole('radio', { name: 'To pay' })).toBeChecked();
+});
+
+test('account: change the password, with the mistakes caught first', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: 'Your account' }));
+  const dialog = screen.getByRole('dialog', { name: 'Your account' });
+  expect(within(dialog).getByText('me@example.com')).toBeInTheDocument();
+  expect(within(dialog).getByRole('link', { name: 'Download your data' })).toHaveAttribute('href', '/api/export');
+
+  const change = within(dialog).getByRole('button', { name: 'Change password' });
+  await user.type(within(dialog).getByLabelText('Current password'), 'wrong horse');
+  await user.type(within(dialog).getByLabelText('New password'), 'short');
+  await user.click(change);
+  expect(within(dialog).getByText('Use at least 8 characters')).toBeInTheDocument();
+  expect(calls.some((c) => c.path === '/api/auth/password')).toBe(false);
+
+  await user.clear(within(dialog).getByLabelText('New password'));
+  await user.type(within(dialog).getByLabelText('New password'), 'battery staple');
+  await user.click(change);
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('That is not your current password');
+
+  await user.clear(within(dialog).getByLabelText('Current password'));
+  await user.type(within(dialog).getByLabelText('Current password'), 'correct horse');
+  await user.click(change);
+  expect(await screen.findByText('Password changed. Other devices were logged out.')).toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: 'Your account' })).not.toBeInTheDocument();
+  expect(calls.find((c) => c.path === '/api/auth/password' && c.body.current_password === 'correct horse').body)
+    .toEqual({ current_password: 'correct horse', new_password: 'battery staple' });
+});
+
+test('account: deleting it asks for the password and ends at the login screen', async () => {
+  const user = userEvent.setup({ advanceTimers: () => {} });
+  await renderApp();
+  await user.click(screen.getByRole('button', { name: 'Your account' }));
+  const dialog = screen.getByRole('dialog', { name: 'Your account' });
+
+  await user.click(within(dialog).getByRole('button', { name: 'Delete my account…' }));
+  await user.click(within(dialog).getByRole('button', { name: 'Delete everything' }));
+  expect(within(dialog).getByText('Enter your password to confirm')).toBeInTheDocument();
+  expect(calls.some((c) => c.path === '/api/auth/delete-account')).toBe(false);
+
+  await user.type(within(dialog).getByLabelText('Your password, to confirm'), 'wrong horse');
+  await user.click(within(dialog).getByRole('button', { name: 'Delete everything' }));
+  expect(await within(dialog).findByText('That is not your current password')).toBeInTheDocument();
+
+  await user.clear(within(dialog).getByLabelText('Your password, to confirm'));
+  await user.type(within(dialog).getByLabelText('Your password, to confirm'), 'correct horse');
+  await user.click(within(dialog).getByRole('button', { name: 'Delete everything' }));
+  expect(await screen.findByText('Your account and its data were deleted.')).toBeInTheDocument();
+  expect(screen.getByLabelText('Password')).toBeInTheDocument();
 });

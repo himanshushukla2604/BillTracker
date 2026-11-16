@@ -25,6 +25,7 @@ def app_(tmp_path, monkeypatch):
     monkeypatch.setenv("FT_SEED", "0")
     monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)  # keep tests fast
     auth._failures.clear()
+    auth._signups.clear()
     from app.main import app
     return app
 
@@ -527,6 +528,110 @@ def test_login_is_throttled_after_repeated_failures(app_):
             c.post("/api/auth/login", json={"email": "me@example.com", "password": "wrong guess"})
         r = c.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
         assert r.status_code == 429
+
+
+def test_a_stranger_guessing_from_elsewhere_does_not_lock_you_out(app_):
+    with TestClient(app_) as me, TestClient(app_, client=("203.0.113.9", 5000)) as stranger:
+        signup(me)
+        for _ in range(auth.MAX_FAILURES):
+            stranger.post("/api/auth/login", json={"email": "me@example.com", "password": "wrong guess"})
+        blocked = stranger.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
+        assert blocked.status_code == 429
+        mine = me.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
+        assert mine.status_code == 200
+
+
+def test_one_address_cannot_spray_guesses_across_many_emails(app_):
+    with TestClient(app_) as c:
+        signup(c)
+        c.post("/api/auth/logout")
+        for i in range(auth.MAX_FAILURES_PER_IP):
+            r = c.post("/api/auth/login", json={"email": f"user{i}@example.com", "password": "wrong guess"})
+            assert r.status_code == 401
+        r = c.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
+        assert r.status_code == 429
+
+
+def test_throttle_memory_is_bounded(monkeypatch):
+    monkeypatch.setattr(auth, "MAX_TRACKED", 50)
+    auth._failures.clear()
+    for i in range(500):
+        auth._failed(f"10.0.{i // 250}.{i % 250}", f"u{i}@example.com")
+    assert len(auth._failures) <= 50 + 3
+    auth._failures.clear()
+
+
+def test_signups_from_one_address_are_limited(app_):
+    with TestClient(app_) as c:
+        for i in range(auth.MAX_SIGNUPS_PER_IP):
+            signup(c, f"new{i}@example.com")
+        r = c.post("/api/auth/register", json={"email": "onemore@example.com", "password": "longenough"})
+        assert r.status_code == 429
+
+
+def test_change_password_logs_out_other_devices(app_):
+    with TestClient(app_) as phone, TestClient(app_) as laptop:
+        signup(phone)
+        assert laptop.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"}).status_code == 200
+
+        wrong = phone.post("/api/auth/password", json={"current_password": "nope nope", "new_password": "battery staple"})
+        assert wrong.status_code == 401
+        short = phone.post("/api/auth/password", json={"current_password": "correct horse", "new_password": "short"})
+        assert short.status_code == 422
+        ok = phone.post("/api/auth/password", json={"current_password": "correct horse", "new_password": "battery staple"})
+        assert ok.status_code == 204
+
+        assert phone.get("/api/auth/me").status_code == 200  # this device stays in
+        assert laptop.get("/api/auth/me").status_code == 401  # the others are out
+        old = laptop.post("/api/auth/login", json={"email": "me@example.com", "password": "correct horse"})
+        assert old.status_code == 401
+        new = laptop.post("/api/auth/login", json={"email": "me@example.com", "password": "battery staple"})
+        assert new.status_code == 200
+
+
+def test_change_password_needs_a_login(app_):
+    with TestClient(app_) as c:
+        r = c.post("/api/auth/password", json={"current_password": "correct horse", "new_password": "battery staple"})
+        assert r.status_code == 401
+
+
+def test_delete_account_erases_only_your_data(app_):
+    with TestClient(app_) as a, TestClient(app_) as b:
+        signup(a, "a@example.com")
+        signup(b, "b@example.com")
+        mk(a, "A rent")
+        mk(b, "B rent")
+        goal = a.post("/api/goals", params=T, json={"name": "House", "budget": 1000}).json()
+        a.post("/api/expenses", params=T, json={"name": "Rods", "amount": 10, "due_date": TODAY.isoformat(),
+                                                 "category": "House", "recurring": "none", "goal_id": goal["id"]})
+
+        assert a.post("/api/auth/delete-account", json={"password": "wrong one"}).status_code == 401
+        assert a.get("/api/auth/me").status_code == 200
+        assert a.post("/api/auth/delete-account", json={"password": "correct horse"}).status_code == 204
+        assert a.get("/api/auth/me").status_code == 401
+
+        conn = db.connect()
+        try:
+            assert [r["email"] for r in conn.execute("SELECT email FROM users")] == ["b@example.com"]
+            assert [r["name"] for r in conn.execute("SELECT name FROM expenses")] == ["B rent"]
+            assert conn.execute("SELECT COUNT(*) FROM goals").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        finally:
+            conn.close()
+        assert [e["name"] for e in b.get("/api/expenses", params={**T, "month": "2026-11"}).json()] == ["B rent"]
+        gone = a.post("/api/auth/login", json={"email": "a@example.com", "password": "correct horse"})
+        assert gone.status_code == 401
+
+
+def test_security_headers(client):
+    r = client.get("/api/expenses", params={**T, "month": "2026-11"})
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in r.headers["content-security-policy"].split("style-src")[0]
+    assert r.headers["cache-control"] == "no-store"
+    assert "strict-transport-security" not in r.headers  # plain http in tests
+    assert "content-security-policy" not in client.get("/docs").headers
 
 
 def test_signups_can_be_closed_except_for_the_first_account(app_, monkeypatch):

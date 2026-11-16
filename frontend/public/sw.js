@@ -1,9 +1,9 @@
 // Makes the installed app open quickly and show its shell even with a bad connection.
 // Only the app's own files are cached; /api responses (your data) never are.
-const CACHE = 'bill-tracker-v1';
+const CACHE = 'bill-tracker-v2';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/manifest.json', '/icon-192.png'])));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/theme.js', '/manifest.json', '/icon-192.png'])));
   self.skipWaiting();
 });
 
@@ -21,6 +21,11 @@ self.addEventListener('fetch', (event) => {
   if (event.request.mode === 'navigate') {
     // Pages: always try the network first so updates show up; fall back to the cached shell.
     event.respondWith(fetch(event.request).catch(() => caches.match('/')));
+    return;
+  }
+  if (url.pathname === '/theme.js') {
+    // Tiny and unhashed: fresh when online, the cached copy when not.
+    event.respondWith(fetch(event.request).catch(() => caches.match('/theme.js')));
     return;
   }
   if (url.pathname.startsWith('/assets/')) {

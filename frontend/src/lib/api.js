@@ -33,6 +33,9 @@ export const api = {
   login: (email, password) => req('POST', '/auth/login', { body: { email, password } }),
   register: (email, password) => req('POST', '/auth/register', { body: { email, password } }),
   logout: () => req('POST', '/auth/logout'),
+  changePassword: (current_password, new_password) =>
+    req('POST', '/auth/password', { body: { current_password, new_password } }),
+  deleteAccount: (password) => req('POST', '/auth/delete-account', { body: { password } }),
   expenses: (month) => req('GET', '/expenses', { params: { month } }),
   upcoming: (days) => req('GET', '/upcoming', { params: { days } }),
   budgets: () => req('GET', '/budgets'),

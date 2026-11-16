@@ -8,7 +8,7 @@ FastAPI + SQLite backend, React + Tailwind (Vite) frontend. Amounts are in INR.
 ```bash
 cd backend
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # the server plus what the tests need
 uvicorn app.main:app --reload --port 8010
 ```
 
@@ -76,7 +76,7 @@ screen. It installs as an app with its own icon and opens full-screen. Two step-
 
 ## API (see `/docs` for the interactive version)
 
-`POST /api/auth/register|login|logout` · `GET /api/auth/me` · `GET /api/export` ·
+`POST /api/auth/register|login|logout|password|delete-account` · `GET /api/auth/me` · `GET /api/export` ·
 `GET/POST /api/loans` · `PUT/DELETE /api/loans/{id}` · `POST /api/loans/{id}/repayments|reminded` ·
 `GET/POST /api/cards` · `PUT/DELETE /api/cards/{id}` · `POST /api/cards/{id}/pay|unpay|emis` · `PUT/DELETE /api/emis/{id}` ·
 `GET/POST /api/expenses` · `PUT/DELETE /api/expenses/{id}` · `POST /api/expenses/{id}/pay|unpay` ·
@@ -90,7 +90,8 @@ Date-sensitive endpoints take an optional `today=YYYY-MM-DD` so the browser's lo
 Your data is one SQLite file, so it is snapshotted automatically:
 
 - **Daily snapshots** go to `backend/data/backups/finance-YYYY-MM-DD.db`: one when the server starts and one before the first change of each day. The newest 14 are kept.
-- **Download your own data** as JSON with the download button in the header (`GET /api/export`).
+- **Your account** (the person button in the header): change your password, which logs out your other
+  devices; download your own data as JSON (`GET /api/export`); or delete the account and everything in it.
   The daily snapshots above hold every account, so they stay on the server.
 - **Keep copies off this disk** by pointing `FT_BACKUP_DIR` at a synced folder, e.g. `FT_BACKUP_DIR=~/Library/Mobile\ Documents/com~apple~CloudDocs/finance-backups`.
 - Settings: `FT_BACKUP_KEEP=30` keeps more, `FT_BACKUP=0` turns snapshots off.
@@ -105,6 +106,6 @@ Restoring checks the file is a healthy database and saves the current one as `fi
 
 ## Tests
 ```bash
-cd backend && python -m pytest        # 66 tests: accounts & isolation, loans, cards & EMIs, paid back, recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
-cd frontend && npm test               # 39 tests: maths, paid back, categories, loans, cards, login, and the full UI against a fake API
+cd backend && python -m pytest        # 78 tests: accounts, throttling & isolation, loans, cards & EMIs, paid back, recurrence, projections, pay/undo, urgency, summary, variance, seed, backups
+cd frontend && npm test               # 54 tests: maths, paid back, categories, loans, cards, login, and the full UI against a fake API
 ```

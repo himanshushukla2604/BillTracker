@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Download, LogOut, Moon, Plus, Search, Sun, CheckCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight, LogOut, Moon, Plus, Search, Sun, CheckCheck, UserRound } from 'lucide-react';
 import { api } from './lib/api';
 import { ALERT_DAYS, computeVariance, isGoal, summarize } from './lib/calc';
 import { daysInMonth, localISO, money, monthLabel, parseISO, shiftMonth } from './lib/format';
 import { withDefaults } from './lib/categories';
 import { useTheme } from './lib/theme';
+import AccountModal from './components/AccountModal';
 import AlertBanner from './components/AlertBanner';
 import AuthScreen from './components/AuthScreen';
 import BudgetsModal from './components/BudgetsModal';
@@ -51,10 +52,13 @@ export default function App() {
     try { await api.logout(); } catch { /* the cookie is gone either way once the session ends */ }
     setUser(null);
   };
-  return <Dashboard key={user.id} user={user} onLogout={logout} onSessionLost={signedOut} />;
+  return (
+    <Dashboard key={user.id} user={user} onLogout={logout} onSessionLost={signedOut}
+      onAccountDeleted={() => { setStartError('Your account and its data were deleted.'); setUser(null); }} />
+  );
 }
 
-function Dashboard({ user, onLogout, onSessionLost }) {
+function Dashboard({ user, onLogout, onSessionLost, onAccountDeleted }) {
   const [dark, toggleTheme] = useTheme();
   const todayISO = localISO();
   const currentMonth = todayISO.slice(0, 7);
@@ -73,6 +77,7 @@ function Dashboard({ user, onLogout, onSessionLost }) {
   };
   const [search, setSearch] = useState(null); // null when closed, else the query typed so far
   const [showTargets, setShowTargets] = useState(false);
+  const [showAccount, setShowAccount] = useState(false);
   const [toast, setToast] = useState(null);
 
   const budgetTimer = useRef(null);
@@ -269,15 +274,10 @@ function Dashboard({ user, onLogout, onSessionLost }) {
           <button className="btn-primary" onClick={() => setForm(tab === 'bills' ? { bill: true } : {})}>
             <Plus className="h-4 w-4" /> <span className="hidden sm:inline">Add expense</span><span className="sm:hidden">Add</span>
           </button>
-          <a
-            className="btn-outline p-2"
-            href="/api/export"
-            download
-            aria-label="Download your data"
-            title="Download your data (JSON)"
-          >
-            <Download className="h-4 w-4" />
-          </a>
+          <button className="btn-outline p-2" onClick={() => setShowAccount(true)}
+            aria-label="Your account" title="Account: password, download or delete your data">
+            <UserRound className="h-4 w-4" />
+          </button>
           <button
             className="btn-outline p-2"
             onClick={toggleTheme}
@@ -428,6 +428,14 @@ function Dashboard({ user, onLogout, onSessionLost }) {
           onSubmit={saveExpense}
           onDelete={(e) => { setForm(null); remove(e); }}
           onClose={() => setForm(null)}
+        />
+      )}
+      {showAccount && (
+        <AccountModal
+          user={user}
+          onClose={() => setShowAccount(false)}
+          onPasswordChanged={() => { setShowAccount(false); setToast({ msg: 'Password changed. Other devices were logged out.' }); }}
+          onDeleted={onAccountDeleted}
         />
       )}
       {showTargets && (

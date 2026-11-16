@@ -49,6 +49,28 @@ Conn = Depends(db.get_conn)
 Me = Depends(auth.current_user)  # every data route is scoped to the logged-in user
 
 
+# Only this site's own files may run or load, and it cannot be framed. /docs is left out: its
+# page loads Swagger from a CDN.
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; "
+       "base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path not in ("/docs", "/redoc"):
+        h.setdefault("Content-Security-Policy", CSP)
+    if request.url.path.startswith("/api/"):
+        h.setdefault("Cache-Control", "no-store")  # your data is never kept by a browser or proxy cache
+    if request.url.scheme == "https":
+        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 @app.middleware("http")
 async def daily_backup(request: Request, call_next):
     """Snapshot the database before the first change of each day (the server may run for weeks)."""
